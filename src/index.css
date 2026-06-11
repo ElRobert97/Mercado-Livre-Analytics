@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+html, body {
+  background-color: #05060f !important;
+  color: #ffffff;
+  margin: 0;
+  padding: 0;
+}
+
+/* Base layout presets for Frosted Glass dashboard */
+.frosted-bg {
+  background-color: #05060f !important;
+  background-image: 
+    radial-gradient(circle at 10% 10%, #1e2252 0%, transparent 45%),
+    radial-gradient(circle at 90% 90%, rgba(255, 230, 0, 0.04) 0%, transparent 45%),
+    radial-gradient(circle at 50% 50%, rgba(52, 131, 250, 0.03) 0%, transparent 60%) !important;
+  background-attachment: fixed !important;
+}
+
+/* Translucent standard container */
+.glass-card {
+  background: rgba(255, 255, 255, 0.03) !important;
+  backdrop-filter: blur(20px) !important;
+  -webkit-backdrop-filter: blur(20px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3) !important;
+}
+
+/* Slight gradient hover border effect */
+.glass-card-hover:hover {
+  border-color: rgba(255, 255, 255, 0.15) !important;
+  box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.4) !important;
+  transform: translateY(-2px);
+  transition: all 0.3s ease;
+}
+
+/* Specific component definitions */
+.glass-sidebar {
+  background: rgba(255, 255, 255, 0.02) !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+  border-right: 1px solid rgba(255, 255, 255, 0.06) !important;
+}
+
+.glass-header {
+  background: rgba(5, 6, 15, 0.75) !important;
+  backdrop-filter: blur(20px) !important;
+  -webkit-backdrop-filter: blur(20px) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+}
+
+.glass-input {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  color: #ffffff !important;
+}
+.glass-input:focus {
+  border-color: #3483FA !important;
+  box-shadow: 0 0 12px rgba(52, 131, 250, 0.2) !important;
+  outline: none !important;
+}
+
+/* Glow effects */
+.glow-yellow {
+  text-shadow: 0 0 12px rgba(255, 230, 0, 0.4);
+}
+
+.glow-blue {
+  text-shadow: 0 0 12px rgba(52, 131, 250, 0.4);
+}
+
+.glow-green {
+  text-shadow: 0 0 12px rgba(0, 255, 102, 0.4);
+}
+
+/* Modal styling */
+.glass-modal {
+  background: rgba(10, 11, 28, 0.85) !important;
+  backdrop-filter: blur(30px) !important;
+  -webkit-backdrop-filter: blur(30px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6) !important;
+}
+
+/* Scrollbars for dark view */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Animations */
+@keyframes pulseSubtle {
+  0%, 100% { opacity: 0.95; }
+  50% { opacity: 0.75; }
+}
+
+.animate-pulse-subtle {
+  animation: pulseSubtle 3s infinite ease-in-out;
+}

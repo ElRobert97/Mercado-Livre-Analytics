@@ -1,0 +1,6 @@
+{
+  "name": "Mercado Livre Analytics",
+  "description": "Plataforma completa de análise de vendas, importação de custos por SKU, cálculo de lucro e margem para Mercado Livre.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
