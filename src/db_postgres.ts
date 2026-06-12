@@ -236,7 +236,16 @@ export const dbOps = {
   async createMLAccount(acc: MercadoLivreAccount): Promise<MercadoLivreAccount> {
     await pool.query(
       `INSERT INTO accounts (id, user_id, nickname, access_token, refresh_token, token_expires_at, ml_user_id, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (id) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
+         nickname = EXCLUDED.nickname,
+         access_token = EXCLUDED.access_token,
+         refresh_token = EXCLUDED.refresh_token,
+         token_expires_at = EXCLUDED.token_expires_at,
+         ml_user_id = EXCLUDED.ml_user_id,
+         status = EXCLUDED.status,
+         updated_at = EXCLUDED.updated_at`,
       [acc.id, acc.user_id, acc.nickname, acc.access_token, acc.refresh_token, acc.token_expires_at, acc.ml_user_id, acc.status, acc.created_at, acc.updated_at]
     );
     return acc;

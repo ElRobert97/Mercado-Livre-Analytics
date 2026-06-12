@@ -141,6 +141,57 @@ async function startServer() {
     return sData.shipping_amount;
   }
 
+  // Helper to refresh a Mercado Livre account's token
+  async function refreshAccountTokenIfNeeded(accId: string, force: boolean = false): Promise<string> {
+    const acc = await dbOps.getAccountById(accId, currentUserSession || "user_robert");
+    if (!acc) {
+      throw new Error(`Conta não encontrada: ${accId}`);
+    }
+
+    if (acc.access_token.startsWith("SIM_") || acc.access_token.startsWith("MOCK_")) {
+      return acc.access_token;
+    }
+
+    // Checking if the token expires soon (within 5 minutes)
+    if (!force && acc.token_expires_at) {
+      const expiresAt = new Date(acc.token_expires_at).getTime();
+      if (expiresAt > Date.now() + 5 * 60 * 1000) {
+        return acc.access_token;
+      }
+    }
+
+    console.log(`[AUTOREFRESH] Renovando token Mercado Livre para a conta: ${acc.nickname || acc.id}`);
+    const clientId = process.env.ML_CLIENT_ID || process.env.MERCADOLIVRE_CLIENT_ID;
+    const clientSecret = process.env.ML_CLIENT_SECRET || process.env.MERCADOLIVRE_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      throw new Error("Chaves de API do Mercado Livre (ML_CLIENT_ID, ML_CLIENT_SECRET) não configuradas no ambiente (.env)");
+    }
+
+    const refreshResponse = await fetch("https://api.mercadolibre.com/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: acc.refresh_token
+      }).toString()
+    });
+
+    if (!refreshResponse.ok) {
+      const errorText = await refreshResponse.text();
+      console.error(`[AUTOREFRESH ERROR] Falha ao renovar token da conta ${acc.id}: ${errorText}`);
+      throw new Error(`Erro de autenticação ao renovar token Mercado Livre: ${errorText}`);
+    }
+
+    const freshTokenData = await refreshResponse.json();
+    const expiresAt = new Date(Date.now() + freshTokenData.expires_in * 1000).toISOString();
+
+    await dbOps.updateMLAccountTokens(acc.id, freshTokenData.access_token, freshTokenData.refresh_token, expiresAt);
+    console.log(`[AUTOREFRESH SUCCESS] Token renovado com sucesso para a conta ${acc.id}`);
+    return freshTokenData.access_token;
+  }
+
   // Normalizes SKU by padding with exactly one '0' if it's a numeric code below 10000
   function normalizeSku(sku: string): string {
     const trimmed = sku.trim();
@@ -592,7 +643,8 @@ async function startServer() {
       }
 
       if (sku) {
-        calculated = calculated.filter(o => o.items.some(it => it.sku.toUpperCase() === (sku as string).toUpperCase()));
+        const normalizedFilterSku = normalizeSku(sku as string).toUpperCase();
+        calculated = calculated.filter(o => o.items.some(it => it.sku.toUpperCase() === normalizedFilterSku));
       }
 
       if (accountId) {
@@ -738,6 +790,14 @@ async function startServer() {
         // REAL SYNC FROM MERCADO LIVRE API
         for (const acc of realAccounts) {
           try {
+            // Pre-fetch a guaranteed valid/refreshed access token
+            let activeToken = acc.access_token;
+            try {
+              activeToken = await refreshAccountTokenIfNeeded(acc.id);
+            } catch (authErr: any) {
+              console.warn(`[SYNC WARNING] Failed pre-sync token refresh for account ${acc.id}, using existing token:`, authErr.message);
+            }
+
             // Fetch real orders mapping to this connected account using date range filters
             let mlSearchUrl = `https://api.mercadolibre.com/orders/search?seller=${acc.ml_user_id}`;
 
@@ -757,9 +817,22 @@ async function startServer() {
             let offset = 0;
             while (true) {
               const paginatedUrl = `${mlSearchUrl}&offset=${offset}`;
-              const mlResponse = await fetch(paginatedUrl, {
-                headers: { "Authorization": `Bearer ${acc.access_token}` }
+              let mlResponse = await fetch(paginatedUrl, {
+                headers: { "Authorization": `Bearer ${activeToken}` }
               });
+
+              if (!mlResponse.ok && mlResponse.status === 401) {
+                console.log(`[SYNC] Got 401 for account ${acc.id}. Attempting forced token refresh.`);
+                try {
+                  activeToken = await refreshAccountTokenIfNeeded(acc.id, true);
+                  // Retry fetch with new token
+                  mlResponse = await fetch(paginatedUrl, {
+                    headers: { "Authorization": `Bearer ${activeToken}` }
+                  });
+                } catch (refreshErr: any) {
+                  console.error(`[SYNC ERROR] Forced token refresh failed for account ${acc.id}:`, refreshErr.message);
+                }
+              }
 
               if (!mlResponse.ok) {
                 const errorStr = await mlResponse.text();
@@ -786,7 +859,7 @@ async function startServer() {
                  let shipCostDetail: number | undefined = undefined;
                  let mlShipmentId: string | undefined = undefined;
                 if (mlOrd.shipping && mlOrd.shipping.id) {
-                  const sData = await getShipmentExtendedData(mlOrd.shipping.id, acc.access_token);
+                  const sData = await getShipmentExtendedData(mlOrd.shipping.id, activeToken);
                   shippingPrice = sData.shipping_amount;
                   shipCity = sData.shipping_city;
                   shipMunicipality = sData.shipping_municipality;
@@ -877,7 +950,7 @@ async function startServer() {
   });
 
   app.get("/api/costs/:sku", requireAuth, async (req, res) => {
-    const sku = req.params.sku;
+    const sku = normalizeSku(req.params.sku).toUpperCase();
     try {
       const cost = await dbOps.getCostBySku(currentUserSession!, sku);
       if (!cost) {
@@ -896,14 +969,7 @@ async function startServer() {
     }
 
     try {
-      sku = sku.trim();
-      // Pad SKU with 0 if it is a number below 10000
-      if (/^\d+$/.test(sku)) {
-        const skuNum = parseInt(sku, 10);
-        if (skuNum < 10000) {
-          sku = "0" + sku;
-        }
-      }
+      sku = normalizeSku(sku);
 
       const nowStr = new Date().toISOString();
       const newCost: ProductCost = {
@@ -981,13 +1047,7 @@ async function startServer() {
           continue;
         }
 
-        // Pad SKU with 0 if it is a number below 10000
-        if (/^\d+$/.test(sku)) {
-          const skuNum = parseInt(sku, 10);
-          if (skuNum < 10000) {
-            sku = "0" + sku;
-          }
-        }
+        sku = normalizeSku(sku);
 
         const costAmount = parseFloat(rawCost.replace(",", "."));
         if (isNaN(costAmount)) {
