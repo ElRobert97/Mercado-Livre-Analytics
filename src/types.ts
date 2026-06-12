@@ -90,6 +90,19 @@ export interface OrderFinancialSummary {
   gross_profit: number;
   margin_percent: number;
   updated_at: string;
+  tax_factor?: number;
+  tax_cost?: number;
+  difal_factor?: number;
+  difal_cost?: number;
+}
+
+export interface StateTaxFactor {
+  id: string;
+  state_code: string;
+  tax_factor: number;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 // Full view response models representing calculated order results
@@ -122,3 +135,31 @@ export interface CalculatedOrder {
   shipping_cost_detail?: number;
   ml_shipment_id?: string;
 }
+
+export type TaxProfileSourceType = "report" | "median" | "manual_override";
+export type TaxCalculationMode = "report_state_factor" | "fallback_median" | "manual_override";
+
+export interface StateTaxProfile {
+  state_code: string;
+  icms_factor: number;
+  difal_factor: number;
+  total_factor: number;
+  source_type: TaxProfileSourceType;
+  active: boolean;
+  valid_from?: string;
+  valid_to?: string;
+  notes?: string;
+}
+
+export interface OrderTaxSummary {
+  order_id: string;
+  shipping_state: string;
+  tax_factor_applied: number;
+  icms_estimated: number;
+  difal_estimated: number;
+  tax_cost_total: number;
+  calculation_mode: TaxCalculationMode;
+  rule_version: string;
+  calculated_at: string;
+}
+

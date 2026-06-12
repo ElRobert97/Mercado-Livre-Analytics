@@ -1,5 +1,5 @@
 import { Pool, PoolConfig } from "pg";
-import { User, MercadoLivreAccount, Order, OrderItem, ProductCost, CostImportBatch, OrderFinancialSummary } from "./types";
+import { User, MercadoLivreAccount, Order, OrderItem, ProductCost, CostImportBatch, OrderFinancialSummary, StateTaxProfile, OrderTaxSummary } from "./types";
 
 // Connection String provided by the user
 const NEON_DB_URL = "postgresql://neondb_owner:npg_kT5LIf7btgCz@ep-weathered-pond-aiuvi42a.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
@@ -110,16 +110,126 @@ export async function initPostgres(): Promise<void> {
         failed_rows INTEGER NOT NULL,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS state_tax_factors (
+        id VARCHAR(100) PRIMARY KEY,
+        state_code VARCHAR(10) UNIQUE NOT NULL,
+        tax_factor NUMERIC(5, 4) NOT NULL,
+        active BOOLEAN DEFAULT true,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS state_tax_profile (
+        state_code CHAR(2) PRIMARY KEY,
+        icms_factor NUMERIC(6, 4) NOT NULL,
+        difal_factor NUMERIC(6, 4) NOT NULL,
+        total_factor NUMERIC(6, 4) NOT NULL,
+        source_type VARCHAR(50) DEFAULT 'report',
+        active BOOLEAN DEFAULT true,
+        valid_from DATE,
+        valid_to DATE,
+        notes TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS order_tax_summary (
+        order_id VARCHAR(100) PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+        shipping_state VARCHAR(255) NOT NULL,
+        tax_factor_applied NUMERIC(6, 4) NOT NULL,
+        icms_estimated NUMERIC(12, 2) NOT NULL,
+        difal_estimated NUMERIC(12, 2) NOT NULL,
+        tax_cost_total NUMERIC(12, 2) NOT NULL,
+        calculation_mode VARCHAR(50) NOT NULL,
+        rule_version VARCHAR(50) NOT NULL,
+        calculated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
-    // Ensure older databases get the new columns for shipment address and cost details
+    // Ensure older databases get the new columns for shipment address, cost details, and tax estimates
     await client.query(`
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_city VARCHAR(255);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_municipality VARCHAR(255);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_state VARCHAR(255);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_cost_detail NUMERIC(12, 2);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS ml_shipment_id VARCHAR(100);
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_factor NUMERIC(5, 4);
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_cost NUMERIC(12, 2);
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS difal_factor NUMERIC(5, 4);
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS difal_cost NUMERIC(12, 2);
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS profit NUMERIC(12, 2);
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS margin_percent NUMERIC(12, 2);
     `);
+
+    // Check if seeding is required for tax factors
+    const factorCheck = await client.query("SELECT COUNT(*) FROM state_tax_factors");
+    const factorCount = parseInt(factorCheck.rows[0].count);
+    if (factorCount === 0) {
+      console.log("Seeding state tax factors...");
+      const initialFactors = [
+        { state: 'SP', factor: 0.24 }, { state: 'RJ', factor: 0.28 }, { state: 'MG', factor: 0.25 },
+        { state: 'ES', factor: 0.24 }, { state: 'PR', factor: 0.23 }, { state: 'SC', factor: 0.22 },
+        { state: 'RS', factor: 0.23 }, { state: 'GO', factor: 0.25 }, { state: 'DF', factor: 0.25 },
+        { state: 'MT', factor: 0.24 }, { state: 'MS', factor: 0.24 }, { state: 'BA', factor: 0.27 },
+        { state: 'PE', factor: 0.28 }, { state: 'CE', factor: 0.27 }, { state: 'PB', factor: 0.27 },
+        { state: 'RN', factor: 0.27 }, { state: 'AL', factor: 0.27 }, { state: 'SE', factor: 0.26 },
+        { state: 'PI', factor: 0.28 }, { state: 'MA', factor: 0.29 }, { state: 'TO', factor: 0.25 },
+        { state: 'PA', factor: 0.27 }, { state: 'AP', factor: 0.27 }, { state: 'AM', factor: 0.28 },
+        { state: 'AC', factor: 0.26 }, { state: 'RO', factor: 0.26 }, { state: 'RR', factor: 0.27 }
+      ];
+      for (const item of initialFactors) {
+        await client.query(`
+          INSERT INTO state_tax_factors (id, state_code, tax_factor, active)
+          VALUES ($1, $2, $3, true)
+          ON CONFLICT (state_code) DO NOTHING
+        `, [`tax_${item.state.toLowerCase()}`, item.state, item.factor]);
+      }
+      console.log("State tax factors seeded successfully.");
+    }
+
+    // Check if seeding is required for state_tax_profile
+    const profileCheck = await client.query("SELECT COUNT(*) FROM state_tax_profile");
+    const profileCount = parseInt(profileCheck.rows[0].count);
+    if (profileCount === 0) {
+      console.log("Seeding state tax profiles...");
+      const initialProfiles = [
+        { state_code: "AC", icms: 0.0645, difal: 0.1273, total: 0.1918, source: "report" },
+        { state_code: "AL", icms: 0.0727, difal: 0.1374, total: 0.2101, source: "report" },
+        { state_code: "AM", icms: 0.0743, difal: 0.1380, total: 0.2122, source: "report" },
+        { state_code: "AP", icms: 0.0721, difal: 0.1305, total: 0.2044, source: "median" },
+        { state_code: "BA", icms: 0.0708, difal: 0.1364, total: 0.2072, source: "report" },
+        { state_code: "CE", icms: 0.0731, difal: 0.1369, total: 0.2100, source: "report" },
+        { state_code: "DF", icms: 0.0712, difal: 0.1300, total: 0.2012, source: "report" },
+        { state_code: "ES", icms: 0.0710, difal: 0.0979, total: 0.1689, source: "report" },
+        { state_code: "GO", icms: 0.0716, difal: 0.1246, total: 0.1962, source: "report" },
+        { state_code: "MA", icms: 0.0722, difal: 0.1650, total: 0.2372, source: "report" },
+        { state_code: "MG", icms: 0.1205, difal: 0.0582, total: 0.1786, source: "report" },
+        { state_code: "MS", icms: 0.0697, difal: 0.1015, total: 0.1712, source: "report" },
+        { state_code: "MT", icms: 0.0709, difal: 0.1029, total: 0.1738, source: "report" },
+        { state_code: "PA", icms: 0.0717, difal: 0.1184, total: 0.1901, source: "report" },
+        { state_code: "PB", icms: 0.0736, difal: 0.1367, total: 0.2104, source: "report" },
+        { state_code: "PE", icms: 0.0720, difal: 0.1382, total: 0.2102, source: "report" },
+        { state_code: "PI", icms: 0.0724, difal: 0.1741, total: 0.2465, source: "report" },
+        { state_code: "PR", icms: 0.1199, difal: 0.0724, total: 0.1923, source: "report" },
+        { state_code: "RJ", icms: 0.1198, difal: 0.0977, total: 0.2175, source: "report" },
+        { state_code: "RN", icms: 0.0705, difal: 0.1310, total: 0.2015, source: "report" },
+        { state_code: "RO", icms: 0.0710, difal: 0.1450, total: 0.2160, source: "report" },
+        { state_code: "RR", icms: 0.0721, difal: 0.1305, total: 0.2044, source: "median" },
+        { state_code: "RS", icms: 0.1205, difal: 0.0530, total: 0.1735, source: "report" },
+        { state_code: "SC", icms: 0.1155, difal: 0.0521, total: 0.1677, source: "report" },
+        { state_code: "SE", icms: 0.0715, difal: 0.1441, total: 0.2156, source: "report" },
+        { state_code: "SP", icms: 0.0058, difal: 0.0000, total: 0.0058, source: "report" },
+        { state_code: "TO", icms: 0.0994, difal: 0.1335, total: 0.2329, source: "report" }
+      ];
+
+      for (const p of initialProfiles) {
+        await client.query(`
+          INSERT INTO state_tax_profile (state_code, icms_factor, difal_factor, total_factor, source_type, active)
+          VALUES ($1, $2, $3, $4, $5, true)
+          ON CONFLICT (state_code) DO NOTHING
+        `, [p.state_code, p.icms, p.difal, p.total, p.source]);
+      }
+      console.log("State tax profiles seeded successfully.");
+    }
 
     // Check if seeding is required (if table users is empty)
     const userCheck = await client.query("SELECT COUNT(*) FROM users");
@@ -192,6 +302,87 @@ export async function initPostgres(): Promise<void> {
     `);
 
     console.log("Purging completed: Only real products and real synced orders/accounts are active in Neon Postgres!");
+
+    // One-time automatic backfill of order_tax_summary for any existing orders on startup
+    const summaryCheck = await client.query("SELECT COUNT(*) FROM order_tax_summary");
+    const summaryCount = parseInt(summaryCheck.rows[0].count);
+    if (summaryCount === 0) {
+      console.log("Analyzing orders for initial tax simulation backfill...");
+      const ordersRes = await client.query("SELECT id, shipping_state, total_amount, status FROM orders");
+      if (ordersRes.rows.length > 0) {
+        console.log(`Backfilling ${ordersRes.rows.length} orders with state tax summaries...`);
+        const profilesRes = await client.query("SELECT * FROM state_tax_profile");
+        const profileMap = new Map<string, any>();
+        profilesRes.rows.forEach((p: any) => profileMap.set(p.state_code.toUpperCase(), p));
+
+        const fallback = { icms_factor: 0.0721, difal_factor: 0.1305, total_factor: 0.2044, source_type: "median" };
+
+        const statesMap: Record<string, string> = {
+          "SAO PAULO": "SP", "SÃO PAULO": "SP", "SP": "SP",
+          "RIO DE JANEIRO": "RJ", "RJ": "RJ",
+          "MINAS GERAIS": "MG", "MG": "MG",
+          "ESPIRITO SANTO": "ES", "ESPÍRITO SANTO": "ES", "ES": "ES",
+          "PARANA": "PR", "PARANÁ": "PR", "PR": "PR",
+          "SANTA CATARINA": "SC", "SC": "SC",
+          "RIO GRANDE DO SUL": "RS", "RS": "RS",
+          "GOIAS": "GO", "GOIÁS": "GO", "GO": "GO",
+          "DISTRITO FEDERAL": "DF", "DF": "DF",
+          "MATO GROSSO": "MT", "MT": "MT",
+          "MATO GROSSO DO SUL": "MS", "MS": "MS",
+          "BAHIA": "BA", "BA": "BA",
+          "PERNAMBUCO": "PE", "PE": "PE",
+          "CEARA": "CE", "CEARÁ": "CE", "CE": "CE",
+          "PARAIBA": "PB", "PARAÍBA": "PB", "PB": "PB",
+          "RIO GRANDE DO NORTE": "RN", "RN": "RN",
+          "ALAGOAS": "AL", "AL": "AL",
+          "SERGIPE": "SE", "SE": "SE",
+          "PIAUI": "PI", "PIAUÍ": "PI", "PI": "PI",
+          "MARANHAO": "MA", "MARANHÃO": "MA", "MA": "MA",
+          "TOCANTINS": "TO", "TO": "TO",
+          "PARA": "PA", "PARÁ": "PA", "PA": "PA",
+          "AMAPA": "AP", "AMAPÁ": "AP", "AP": "AP",
+          "AMAZONAS": "AM", "AM": "AM",
+          "ACRE": "AC", "AC": "AC",
+          "RONDONIA": "RO", "RONDÔNIA": "RO", "RO": "RO",
+          "RORAIMA": "RR", "RR": "RR"
+        };
+
+        for (const o of ordersRes.rows) {
+          const rawState = (o.shipping_state || "").trim().toUpperCase();
+          const stateCode = statesMap[rawState] || "";
+          let profile = profileMap.get(stateCode) || fallback;
+          
+          let calcMode = "report_state_factor";
+          if (profile.source_type === "median" || !stateCode) {
+            calcMode = "fallback_median";
+          } else if (profile.source_type === "manual_override") {
+            calcMode = "manual_override";
+          }
+
+          const revenue = Number(o.total_amount) || 0;
+          const isCancelled = o.status.toLowerCase() === "cancelled";
+          const icms_estimated = isCancelled ? 0 : (revenue * Number(profile.icms_factor));
+          const difal_estimated = isCancelled ? 0 : (revenue * Number(profile.difal_factor));
+          const tax_cost_total = icms_estimated + difal_estimated;
+          const tax_factor_applied = Number(profile.total_factor);
+
+          await client.query(`
+            INSERT INTO order_tax_summary (order_id, shipping_state, tax_factor_applied, icms_estimated, difal_estimated, tax_cost_total, calculation_mode, rule_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'v1.0-simulacao-simples-backfill')
+            ON CONFLICT (order_id) DO UPDATE SET
+              shipping_state = EXCLUDED.shipping_state,
+              tax_factor_applied = EXCLUDED.tax_factor_applied,
+              icms_estimated = EXCLUDED.icms_estimated,
+              difal_estimated = EXCLUDED.difal_estimated,
+              tax_cost_total = EXCLUDED.tax_cost_total,
+              calculation_mode = EXCLUDED.calculation_mode,
+              rule_version = EXCLUDED.rule_version,
+              calculated_at = CURRENT_TIMESTAMP
+          `, [o.id, o.shipping_state || "Indefinido", tax_factor_applied, icms_estimated, difal_estimated, tax_cost_total, calcMode]);
+        }
+        console.log(`Successfully backfilled ${ordersRes.rows.length} orders with state tax summaries.`);
+      }
+    }
   } catch (err) {
     console.error("Error setting up PostgreSQL database schema or seeding:", err);
     throw err;
@@ -373,8 +564,8 @@ export const dbOps = {
       
       // Upsert order
       await client.query(
-        `INSERT INTO orders (id, user_id, ml_account_id, ml_order_id, status, order_date, total_amount, shipping_amount, discount_amount, marketplace_fee_amount, net_amount, pack_id, shipping_city, shipping_municipality, shipping_state, shipping_cost_detail, ml_shipment_id, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        `INSERT INTO orders (id, user_id, ml_account_id, ml_order_id, status, order_date, total_amount, shipping_amount, discount_amount, marketplace_fee_amount, net_amount, pack_id, shipping_city, shipping_municipality, shipping_state, shipping_cost_detail, ml_shipment_id, tax_factor, tax_cost, difal_factor, difal_cost, profit, margin_percent, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
          ON CONFLICT (id) DO UPDATE 
          SET status = EXCLUDED.status,
              total_amount = EXCLUDED.total_amount,
@@ -388,6 +579,12 @@ export const dbOps = {
              shipping_state = EXCLUDED.shipping_state,
              shipping_cost_detail = EXCLUDED.shipping_cost_detail,
              ml_shipment_id = EXCLUDED.ml_shipment_id,
+             tax_factor = EXCLUDED.tax_factor,
+             tax_cost = EXCLUDED.tax_cost,
+             difal_factor = EXCLUDED.difal_factor,
+             difal_cost = EXCLUDED.difal_cost,
+             profit = EXCLUDED.profit,
+             margin_percent = EXCLUDED.margin_percent,
              updated_at = CURRENT_TIMESTAMP`,
         [
           order.id, order.user_id, order.ml_account_id, order.ml_order_id, order.status, order.order_date,
@@ -396,6 +593,12 @@ export const dbOps = {
           order.shipping_city || null, order.shipping_municipality || null, order.shipping_state || null,
           order.shipping_cost_detail !== undefined ? order.shipping_cost_detail : null,
           order.ml_shipment_id || null,
+          (order as any).tax_factor !== undefined ? (order as any).tax_factor : null,
+          (order as any).tax_cost !== undefined ? (order as any).tax_cost : null,
+          (order as any).difal_factor !== undefined ? (order as any).difal_factor : null,
+          (order as any).difal_cost !== undefined ? (order as any).difal_cost : null,
+          (order as any).profit !== undefined ? (order as any).profit : null,
+          (order as any).margin_percent !== undefined ? (order as any).margin_percent : null,
           order.created_at, order.updated_at
         ]
       );
@@ -426,5 +629,123 @@ export const dbOps = {
     } finally {
       client.release();
     }
+  },
+
+  // --- STATE TAX FACTORS ---
+  async getStateTaxFactors(): Promise<any[]> {
+    const res = await pool.query("SELECT * FROM state_tax_factors ORDER BY state_code ASC");
+    return res.rows;
+  },
+
+  async updateStateTaxFactor(id: string, taxFactor: number, active: boolean): Promise<void> {
+    await pool.query(
+      `UPDATE state_tax_factors
+       SET tax_factor = $1, active = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3`,
+      [taxFactor, active, id]
+    );
+  },
+
+  // --- STATE TAX PROFILES ---
+  async getStateTaxProfiles(): Promise<StateTaxProfile[]> {
+    const res = await pool.query("SELECT * FROM state_tax_profile ORDER BY state_code ASC");
+    return res.rows.map(row => ({
+      state_code: row.state_code,
+      icms_factor: Number(row.icms_factor),
+      difal_factor: Number(row.difal_factor),
+      total_factor: Number(row.total_factor),
+      source_type: row.source_type,
+      active: row.active,
+      valid_from: row.valid_from,
+      valid_to: row.valid_to,
+      notes: row.notes
+    }));
+  },
+
+  async updateStateTaxProfile(profile: StateTaxProfile): Promise<void> {
+    await pool.query(
+      `INSERT INTO state_tax_profile (state_code, icms_factor, difal_factor, total_factor, source_type, active, valid_from, valid_to, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (state_code) DO UPDATE SET
+         icms_factor = EXCLUDED.icms_factor,
+         difal_factor = EXCLUDED.difal_factor,
+         total_factor = EXCLUDED.total_factor,
+         source_type = EXCLUDED.source_type,
+         active = EXCLUDED.active,
+         valid_from = EXCLUDED.valid_from,
+         valid_to = EXCLUDED.valid_to,
+         notes = EXCLUDED.notes`,
+      [
+        profile.state_code.toUpperCase(),
+        profile.icms_factor,
+        profile.difal_factor,
+        profile.total_factor,
+        profile.source_type,
+        profile.active,
+        profile.valid_from || null,
+        profile.valid_to || null,
+        profile.notes || null
+      ]
+    );
+  },
+
+  // --- ORDER TAX SUMMARIES ---
+  async saveOrderTaxSummary(summary: OrderTaxSummary): Promise<void> {
+    await pool.query(
+      `INSERT INTO order_tax_summary (order_id, shipping_state, tax_factor_applied, icms_estimated, difal_estimated, tax_cost_total, calculation_mode, rule_version, calculated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (order_id) DO UPDATE SET
+         shipping_state = EXCLUDED.shipping_state,
+         tax_factor_applied = EXCLUDED.tax_factor_applied,
+         icms_estimated = EXCLUDED.icms_estimated,
+         difal_estimated = EXCLUDED.difal_estimated,
+         tax_cost_total = EXCLUDED.tax_cost_total,
+         calculation_mode = EXCLUDED.calculation_mode,
+         rule_version = EXCLUDED.rule_version,
+         calculated_at = CURRENT_TIMESTAMP`,
+      [
+        summary.order_id,
+        summary.shipping_state,
+        summary.tax_factor_applied,
+        summary.icms_estimated,
+        summary.difal_estimated,
+        summary.tax_cost_total,
+        summary.calculation_mode,
+        summary.rule_version,
+        summary.calculated_at
+      ]
+    );
+  },
+
+  async getOrderTaxSummaries(): Promise<OrderTaxSummary[]> {
+    const res = await pool.query("SELECT * FROM order_tax_summary");
+    return res.rows.map(row => ({
+      order_id: row.order_id,
+      shipping_state: row.shipping_state,
+      tax_factor_applied: Number(row.tax_factor_applied),
+      icms_estimated: Number(row.icms_estimated),
+      difal_estimated: Number(row.difal_estimated),
+      tax_cost_total: Number(row.tax_cost_total),
+      calculation_mode: row.calculation_mode,
+      rule_version: row.rule_version,
+      calculated_at: row.calculated_at
+    }));
+  },
+
+  async getOrderTaxSummaryById(orderId: string): Promise<OrderTaxSummary | null> {
+    const res = await pool.query("SELECT * FROM order_tax_summary WHERE order_id = $1", [orderId]);
+    if (res.rows.length === 0) return null;
+    const row = res.rows[0];
+    return {
+      order_id: row.order_id,
+      shipping_state: row.shipping_state,
+      tax_factor_applied: Number(row.tax_factor_applied),
+      icms_estimated: Number(row.icms_estimated),
+      difal_estimated: Number(row.difal_estimated),
+      tax_cost_total: Number(row.tax_cost_total),
+      calculation_mode: row.calculation_mode,
+      rule_version: row.rule_version,
+      calculated_at: row.calculated_at
+    };
   }
 };

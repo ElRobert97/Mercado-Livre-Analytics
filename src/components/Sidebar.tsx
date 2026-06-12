@@ -1,4 +1,4 @@
-import { LayoutDashboard, ShoppingCart, Tag, Share2, LogOut, Receipt } from "lucide-react";
+import { LayoutDashboard, ShoppingCart, Tag, Share2, LogOut, Receipt, Package } from "lucide-react";
 
 interface SidebarProps {
   currentTab: string;
@@ -6,18 +6,20 @@ interface SidebarProps {
   userEmail: string;
   userName: string;
   onLogout: () => void;
+  sidebarOpen: boolean;
 }
 
-export default function Sidebar({ currentTab, onTabChange, userName, userEmail, onLogout }: SidebarProps) {
+export default function Sidebar({ currentTab, onTabChange, userName, userEmail, onLogout, sidebarOpen }: SidebarProps) {
   const menuItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "orders", label: "Pedidos", icon: ShoppingCart },
     { id: "costs", label: "Custos por SKU", icon: Tag },
+    { id: "products", label: "Anúncios", icon: Package },
     { id: "integrations", label: "Integrações ML", icon: Share2 },
   ];
 
   return (
-    <aside className="w-64 glass-sidebar text-white flex flex-col h-screen fixed left-0 top-0 z-30">
+    <aside className={`w-64 glass-sidebar text-white flex flex-col h-screen fixed top-0 z-30 transition-all duration-300 ${sidebarOpen ? "left-0" : "-left-64"}`}>
       {/* Brand logo */}
       <div className="p-6 border-b border-white/5 flex items-center gap-3">
         <div className="bg-gradient-to-br from-yellow-400 to-amber-500 p-2 rounded-xl text-slate-950 font-bold flex items-center justify-center shadow-lg shadow-yellow-400/15">

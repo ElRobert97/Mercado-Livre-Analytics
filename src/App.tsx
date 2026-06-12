@@ -6,6 +6,7 @@ import OrdersView from "./components/OrdersView";
 import CostsView from "./components/CostsView";
 import IntegrationsView from "./components/IntegrationsView";
 import AuthView from "./components/AuthView";
+import ProductsView from "./components/ProductsView";
 import { checkAuth, getMLAccounts, syncMLOrders, logout } from "./services/api";
 import { MercadoLivreAccount } from "./types";
 import { Info, HelpCircle } from "lucide-react";
@@ -15,6 +16,20 @@ export default function App() {
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [currentTab, setCurrentTab] = useState("dashboard");
   const [accounts, setAccounts] = useState<MercadoLivreAccount[]>([]);
+  
+  // Persistent sidebar open state
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
+    const saved = localStorage.getItem("sidebar_open");
+    return saved !== null ? saved === "true" : true;
+  });
+
+  const handleToggleSidebar = () => {
+    setSidebarOpen(prev => {
+      const next = !prev;
+      localStorage.setItem("sidebar_open", String(next));
+      return next;
+    });
+  };
   
   // Sincronização states
   const [syncing, setSyncing] = useState(false);
@@ -109,6 +124,8 @@ export default function App() {
         return <OrdersView />;
       case "costs":
         return <CostsView />;
+      case "products":
+        return <ProductsView />;
       case "integrations":
         return <IntegrationsView accounts={accounts} onRefreshList={loadAccounts} />;
       default:
@@ -126,10 +143,11 @@ export default function App() {
         userName={user.name}
         userEmail={user.email}
         onLogout={handleLogout}
+        sidebarOpen={sidebarOpen}
       />
 
       {/* 2. Right Workspace Panel */}
-      <div className="flex-1 pl-64 flex flex-col min-h-screen">
+      <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${sidebarOpen ? "pl-64" : "pl-0"}`}>
         
         {/* Header navigation bar */}
         <Header
@@ -138,6 +156,8 @@ export default function App() {
           syncing={syncing}
           onSync={handleSyncOrders}
           syncSuccessMessage={syncSuccessMessage}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={handleToggleSidebar}
         />
 
         {/* Scrollable primary dynamic tab viewpoint container */}

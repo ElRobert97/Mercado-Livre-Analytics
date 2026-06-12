@@ -1,4 +1,4 @@
-import { CalculatedOrder, MercadoLivreAccount, ProductCost, CostImportBatch, OrderFinancialSummary } from "../types";
+import { CalculatedOrder, MercadoLivreAccount, ProductCost, CostImportBatch, OrderFinancialSummary, StateTaxProfile } from "../types";
 
 // Setup base URL which is empty by default since it proxies Express server
 const BASE_URL = "";
@@ -100,6 +100,55 @@ export async function syncMLOrders(dateFrom?: string, dateTo?: string): Promise<
   if (!res.ok) {
     const err = await res.json();
     throw new Error(err.error || "Erro ao sincronizar pedidos");
+  }
+  return res.json();
+}
+
+export async function getMLProducts(params: {
+  accountId?: string;
+  search?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ products: any[]; total: number }> {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, val]) => {
+    if (val !== undefined && val !== "") {
+      query.set(key, String(val));
+    }
+  });
+
+  const res = await fetch(`${BASE_URL}/api/products?${query.toString()}`);
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || "Erro ao carregar anúncios");
+  }
+  return res.json();
+}
+
+export async function updateMLProduct(
+  id: string,
+  data: {
+    accountId: string;
+    title?: string;
+    price?: number;
+    available_quantity?: number;
+    status?: string;
+    video_id?: string;
+    warranty?: string;
+    sku?: string;
+  }
+): Promise<{ success: boolean; message: string; item: any }> {
+  const res = await fetch(`${BASE_URL}/api/products/${id}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || "Erro ao atualizar anúncio");
   }
   return res.json();
 }
@@ -222,4 +271,49 @@ export async function getAiAdvisorReport(dateFrom?: string, dateTo?: string): Pr
     throw new Error(err.error || "Erro de resposta da IA");
   }
   return res.json();
+}
+
+export async function getStateTaxFactors(): Promise<any[]> {
+  const res = await fetch(`${BASE_URL}/api/tax-factors`);
+  if (!res.ok) throw new Error("Erro ao buscar fatores tributários");
+  return res.json();
+}
+
+export async function updateStateTaxFactor(id: string, taxFactor: number, active: boolean): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/tax-factors/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tax_factor: taxFactor, active })
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || "Erro ao atualizar fator tributário");
+  }
+}
+
+export async function recalculateOrderProfit(): Promise<{ message: string }> {
+  const res = await fetch(`${BASE_URL}/api/orders/recalculate`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || "Erro ao reprocessar lucros dos pedidos");
+  }
+  return res.json();
+}
+
+export async function getStateTaxProfiles(): Promise<StateTaxProfile[]> {
+  const res = await fetch(`${BASE_URL}/api/tax-profiles`);
+  if (!res.ok) throw new Error("Erro ao buscar perfis tributários");
+  return res.json();
+}
+
+export async function updateStateTaxProfile(profile: StateTaxProfile): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/tax-profiles/${profile.state_code}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(profile)
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || "Erro ao atualizar perfil tributário");
+  }
 }

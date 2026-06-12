@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { getOrders, getOrderDetails, syncMLOrders } from "../services/api";
 import { CalculatedOrder } from "../types";
-import { Search, Filter, AlertCircle, ShoppingBag, Eye, Calendar, Sparkles, X, XCircle, ArrowUpRight, DollarSign, Wallet, RefreshCw } from "lucide-react";
+import { Search, Filter, AlertCircle, ShoppingBag, Eye, Calendar, Sparkles, X, XCircle, ArrowUpRight, DollarSign, Wallet, RefreshCw, Landmark } from "lucide-react";
+import TaxFactorsConfig from "./TaxFactorsConfig";
 
 export default function OrdersView() {
   const [orders, setOrders] = useState<CalculatedOrder[]>([]);
@@ -12,6 +13,7 @@ export default function OrdersView() {
   const [error, setError] = useState<string | null>(null);
 
   // Search/Filter states
+  const [activeTab, setActiveTab] = useState<"orders" | "tax">("orders");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [sku, setSku] = useState("");
@@ -93,8 +95,40 @@ export default function OrdersView() {
 
   return (
     <div className="max-w-7xl mx-auto px-1 space-y-6 pb-16">
-      {/* Search & Filter cards */}
-      <div className="glass-card rounded-2xl p-6 relative overflow-hidden">
+      {/* Dynamic Tab Toggle */}
+      <div className="flex border-b border-white/10 gap-6">
+        <button
+          onClick={() => setActiveTab("orders")}
+          className={`pb-4 text-xs font-black uppercase tracking-wider transition-all border-b-2 flex items-center gap-2 cursor-pointer ${
+            activeTab === "orders"
+              ? "border-yellow-400 text-yellow-400"
+              : "border-transparent text-white/40 hover:text-white/60"
+          }`}
+          id="tab-orders"
+        >
+          <ShoppingBag className="h-4 w-4" />
+          Pedidos Integrados
+        </button>
+        <button
+          onClick={() => setActiveTab("tax")}
+          className={`pb-4 text-xs font-black uppercase tracking-wider transition-all border-b-2 flex items-center gap-2 cursor-pointer ${
+            activeTab === "tax"
+              ? "border-yellow-400 text-yellow-400"
+              : "border-transparent text-white/40 hover:text-white/60"
+          }`}
+          id="tab-tax-config"
+        >
+          <Landmark className="h-4 w-4" />
+          Fatores de Imposto por Estado
+        </button>
+      </div>
+
+      {activeTab === "tax" ? (
+        <TaxFactorsConfig onRecalculateComplete={() => loadOrders(1)} />
+      ) : (
+        <>
+          {/* Search & Filter cards */}
+          <div className="glass-card rounded-2xl p-6 relative overflow-hidden">
         <form onSubmit={handleSearchSubmit} className="space-y-4">
           <div className="flex flex-col md:flex-row gap-4">
             {/* Search Input bar */}
@@ -373,6 +407,8 @@ export default function OrdersView() {
           </div>
         )}
       </div>
+      </>
+    )}
 
       {/* 5. Detailed Drawer/Modal of Order (Finance apuration) */}
       {selectedOrderId && (
@@ -420,24 +456,58 @@ export default function OrdersView() {
                     <div className="bg-black/25 rounded-2xl p-5 border border-white/5">
                       <div className="space-y-3 font-semibold text-xs">
                         <div className="flex justify-between pb-2.5 border-b border-white/5">
-                          <span className="text-white/50">Faturamento Bruto (Itens)</span>
+                          <span className="text-white/50">Faturamento Bruto (Preço do Produto)</span>
                           <span className="font-mono text-white">{formatCurrency(detailOrder.total_amount)}</span>
                         </div>
-                        <div className="flex justify-between pb-2.5 border-b border-white/5">
-                          <span className="text-white/50">Frete Pago pelo Comprador (+)</span>
-                          <span className="font-mono text-white">+{formatCurrency(detailOrder.shipping_amount)}</span>
-                        </div>
-                        <div className="flex justify-between pb-2.5 border-b border-white/5 text-red-400">
-                          <span>Descontos / Cupons Co-financiados (-)</span>
-                          <span className="font-mono">-{formatCurrency(detailOrder.discount_amount)}</span>
-                        </div>
+                        {detailOrder.discount_amount > 0 && (
+                          <div className="flex justify-between pb-2.5 border-b border-white/5 text-red-400">
+                            <span>Descontos / Cupons Co-financiados (-)</span>
+                            <span className="font-mono">-{formatCurrency(detailOrder.discount_amount)}</span>
+                          </div>
+                        )}
                         <div className="flex justify-between pb-2.5 border-b border-white/5 text-red-400">
                           <span>Taxas & Comissões Mercado Livre (-)</span>
                           <span className="font-mono">-{formatCurrency(detailOrder.marketplace_fee_amount)}</span>
                         </div>
+                        {detailOrder.shipping_cost_detail !== undefined && Number(detailOrder.shipping_cost_detail) > 0 && (
+                          <div className="flex justify-between pb-2.5 border-b border-white/5 text-red-400">
+                            <span>Frete / Coparticipação de Envio do Vendedor (-)</span>
+                            <span className="font-mono">-{formatCurrency(detailOrder.shipping_cost_detail)}</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between pb-2.5 border-b border-white/5 pt-1 font-bold text-white/95 bg-white/2 px-2.5 py-1.5 rounded-lg border border-white/5">
+                          <span className="text-white/60">Saldo do Repasse Mercado Livre (=)</span>
+                          <span className="font-mono">{formatCurrency(detailOrder.net_amount)}</span>
+                        </div>
+                        {detailOrder.financial_summary?.difal_factor !== undefined && Number(detailOrder.financial_summary.difal_factor) > 0 && (
+                          <div className="flex justify-between pb-2.5 border-b border-white/5 text-red-400">
+                            <span>DIFAL Estimado ({detailOrder.shipping_state || "Destino"}) ({(Number(detailOrder.financial_summary.difal_factor) * 100).toFixed(2)}%) (-)</span>
+                            <span className="font-mono">-{formatCurrency(detailOrder.financial_summary.difal_cost)}</span>
+                          </div>
+                        )}
+                        {detailOrder.financial_summary?.tax_cost !== undefined && (
+                          <div className="flex justify-between pb-2.5 border-b border-white/5 text-red-400">
+                            <span>
+                              ICMS Estimado ({detailOrder.shipping_state || "Destino"}{" "}
+                              {detailOrder.financial_summary.tax_factor !== undefined 
+                                ? `(${(Math.max(0, Number(detailOrder.financial_summary.tax_factor) - Number(detailOrder.financial_summary.difal_factor || 0)) * 100).toFixed(2)}%)` 
+                                : ""}
+                              ) (-)
+                            </span>
+                            <span className="font-mono">-{formatCurrency(detailOrder.financial_summary.tax_cost)}</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between pb-2.5 border-b border-white/5 text-red-300">
+                          <span>Custo Unitário dos Produtos (COGS) (-)</span>
+                          <span className="font-mono">-{formatCurrency(detailOrder.financial_summary?.total_cost || 0)}</span>
+                        </div>
                         <div className="flex justify-between pt-1 text-white font-black bg-white/5 p-3 rounded-xl border border-white/10">
-                          <span>Receita Líquida Estimada</span>
-                          <span className="font-mono tracking-tight text-sm text-[#00FF66]">{formatCurrency(detailOrder.net_amount)}</span>
+                          <span>Lucro Real Líquido Estimado</span>
+                          <span className="font-mono tracking-tight text-sm text-[#00FF66]">
+                            {detailOrder.status.toLowerCase() === "cancelled" 
+                              ? formatCurrency(0) 
+                              : formatCurrency(detailOrder.financial_summary?.gross_profit || 0)}
+                          </span>
                         </div>
                       </div>
                     </div>

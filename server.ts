@@ -3,7 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { initPostgres, dbOps, pool } from "./src/db_postgres";
-import { User, MercadoLivreAccount, Order, OrderItem, ProductCost, CostImportBatch, OrderFinancialSummary, CalculatedOrder } from "./src/types";
+import { User, MercadoLivreAccount, Order, OrderItem, ProductCost, CostImportBatch, OrderFinancialSummary, CalculatedOrder, StateTaxProfile } from "./src/types";
 
 // Initialize Gemini client (calls from server only)
 const geminiApiKey = process.env.GEMINI_API_KEY;
@@ -241,53 +241,241 @@ async function startServer() {
     return String(itRow.item.id || `SKU_${idx}`).trim().toUpperCase();
   }
 
-  // Helper to calculate full order details dynamically based on SKU costs
+  // --- STATE NORMALIZATION HELPER ---
+  function normalizeStateCode(stateName: string | null | undefined): string {
+    if (!stateName) return "";
+    const name = stateName.toLowerCase().trim()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // strip accents like São Paulo -> sao paulo
+    
+    if (name === "sp" || name.includes("sao paulo")) return "SP";
+    if (name === "rj" || name.includes("rio de janeiro")) return "RJ";
+    if (name === "mg" || name.includes("minas gerais")) return "MG";
+    if (name === "es" || name.includes("espirito santo")) return "ES";
+    if (name === "pr" || name.includes("parana")) return "PR";
+    if (name === "sc" || name.includes("santa catarina")) return "SC";
+    if (name === "rs" || name.includes("rio grande do sul")) return "RS";
+    if (name === "go" || name.includes("goias")) return "GO";
+    if (name === "df" || name.includes("distrito federal")) return "DF";
+    if (name === "mt" || (name.includes("mato grosso") && !name.includes("sul"))) return "MT";
+    if (name === "ms" || name.includes("mato grosso do sul")) return "MS";
+    if (name === "ba" || name.includes("bahia")) return "BA";
+    if (name === "pe" || name.includes("pernambuco")) return "PE";
+    if (name === "ce" || name.includes("ceara")) return "CE";
+    if (name === "pb" || name.includes("paraiba")) return "PB";
+    if (name === "rn" || name.includes("rio grande do norte")) return "RN";
+    if (name === "al" || name.includes("alagoas")) return "AL";
+    if (name === "se" || name.includes("sergipe")) return "SE";
+    if (name === "pi" || name.includes("piaui")) return "PI";
+    if (name === "ma" || name.includes("maranhao")) return "MA";
+    if (name === "to" || name.includes("tocantins")) return "TO";
+    if (name === "pa" || (name.includes("para") && name !== "parana" && name !== "paraiba")) return "PA";
+    if (name === "ap" || name.includes("amapa")) return "AP";
+    if (name === "am" || name.includes("amazonas")) return "AM";
+    if (name === "ac" || name.includes("acre")) return "AC";
+    if (name === "ro" || name.includes("rondonia")) return "RO";
+    if (name === "rr" || name.includes("roraima")) return "RR";
+
+    // check 2 letter raw
+    const uppercase = stateName.toUpperCase().trim();
+    if (["SP", "RJ", "MG", "ES", "PR", "SC", "RS", "GO", "DF", "MT", "MS", "BA", "PE", "CE", "PB", "RN", "AL", "SE", "PI", "MA", "TO", "PA", "AP", "AM", "AC", "RO", "RR"].includes(uppercase)) {
+      return uppercase;
+    }
+    return "";
+  }
+
+  // --- TAX ESTIMATION ENGINE SPEC-ALIGNED OBJECTS ---
+  const TaxFactorService = {
+    get_tax_factor_by_state: async (stateName: string | null | undefined): Promise<number> => {
+      const code = normalizeStateCode(stateName);
+      if (!code) return 0.25;
+      const factors = await dbOps.getStateTaxFactors();
+      const match = factors.find(f => f.state_code.toUpperCase() === code.toUpperCase() && f.active);
+      return match ? Number(match.tax_factor) : 0.25;
+    },
+
+    calculate_tax_cost: (revenue: number, taxFactor: number): number => {
+      return revenue * taxFactor;
+    },
+
+    calculate_order_profit: (revenue: number, marketplaceFee: number, shippingCost: number, productCost: number, taxCost: number, discount: number = 0): number => {
+      return revenue - discount - marketplaceFee - shippingCost - productCost - taxCost;
+    }
+  };
+
+  const StateTaxFactorRepository = {
+    get_by_state: async (stateCode: string) => {
+      const factors = await dbOps.getStateTaxFactors();
+      return factors.find(f => f.state_code.toUpperCase() === stateCode.toUpperCase()) || null;
+    },
+    get_all: async () => {
+      return dbOps.getStateTaxFactors();
+    },
+    create: async (stateCode: string, taxFactor: number, active: boolean = true) => {
+      const id = `tax_${stateCode.toLowerCase()}`;
+      await pool.query(
+        `INSERT INTO state_tax_factors (id, state_code, tax_factor, active)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (state_code) DO UPDATE SET tax_factor = EXCLUDED.tax_factor, active = EXCLUDED.active, updated_at = CURRENT_TIMESTAMP`,
+        [id, stateCode.toUpperCase(), taxFactor, active]
+      );
+    },
+    update: async (id: string, taxFactor: number, active: boolean) => {
+      await dbOps.updateStateTaxFactor(id, taxFactor, active);
+    }
+  };
+
+  async function recalculate_order_profit(userId: string): Promise<void> {
+    const { orders: rawOrders, items: rawItems } = await dbOps.getRawOrdersAndItems(userId);
+    const costs = await dbOps.getUserCosts(userId);
+    const profiles = await dbOps.getStateTaxProfiles();
+  
+    const costMap = new Map<string, number>();
+    costs.forEach(c => costMap.set(c.sku.toUpperCase(), Number(c.cost_unitary)));
+  
+    const profileMap = new Map<string, StateTaxProfile>();
+    profiles.forEach(p => {
+      if (p.active) {
+        profileMap.set(p.state_code.toUpperCase(), p);
+      }
+    });
+
+    const fallbackProfile: StateTaxProfile = {
+      state_code: "MEDIAN",
+      icms_factor: 0.0721,
+      difal_factor: 0.1305,
+      total_factor: 0.2044,
+      source_type: "median",
+      active: true
+    };
+  
+    const itemsByOrder = new Map<string, OrderItem[]>();
+    rawItems.forEach(item => {
+      const arr = itemsByOrder.get(item.order_id) || [];
+      arr.push(item);
+      itemsByOrder.set(item.order_id, arr);
+    });
+  
+    for (const o of rawOrders) {
+      const isCancelled = o.status.toLowerCase() === "cancelled";
+      
+      const orderItems = itemsByOrder.get(o.id) || [];
+      let product_cost = 0;
+      orderItems.forEach(item => {
+        const uCost = costMap.get(item.sku.toUpperCase()) || 0;
+        product_cost += (uCost * item.quantity);
+      });
+  
+      const stateCode = normalizeStateCode(o.shipping_state);
+      let profile = profileMap.get(stateCode);
+      let calcMode: "report_state_factor" | "fallback_median" | "manual_override" = "report_state_factor";
+      if (!profile) {
+        profile = fallbackProfile;
+        calcMode = "fallback_median";
+      } else {
+        if (profile.source_type === "manual_override") {
+          calcMode = "manual_override";
+        } else if (profile.source_type === "median") {
+          calcMode = "fallback_median";
+        }
+      }
+  
+      const revenue = Number(o.total_amount) || 0;
+      const icms_estimated = isCancelled ? 0 : (revenue * profile.icms_factor);
+      const difal_estimated = isCancelled ? 0 : (revenue * profile.difal_factor);
+      const tax_cost_total = icms_estimated + difal_estimated;
+      const tax_factor_applied = profile.total_factor;
+
+      const shipping_cost_detail = Number(o.shipping_cost_detail) || 0;
+      const revenue_net = isCancelled ? 0 : (revenue - Number(o.discount_amount) - Number(o.marketplace_fee_amount) - shipping_cost_detail);
+      const profit = isCancelled ? 0 : (revenue_net - product_cost - tax_cost_total);
+      const margin_percent = isCancelled ? 0 : (revenue > 0 ? (profit / revenue) * 100 : 0);
+  
+      await pool.query(
+        `UPDATE orders 
+         SET tax_factor = $1, tax_cost = $2, difal_factor = $3, difal_cost = $4, profit = $5, margin_percent = $6, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $7`,
+        [tax_factor_applied, icms_estimated, profile.difal_factor, difal_estimated, profit, margin_percent, o.id]
+      );
+
+      await dbOps.saveOrderTaxSummary({
+        order_id: o.id,
+        shipping_state: o.shipping_state || "Indefinido",
+        tax_factor_applied,
+        icms_estimated,
+        difal_estimated,
+        tax_cost_total,
+        calculation_mode: calcMode,
+        rule_version: "v1.0-simulacao-simples",
+        calculated_at: new Date().toISOString()
+      });
+    }
+  }
+
+  // Helper to calculate full order details dynamically based on SKU costs and state tax codes
   async function getCalculatedOrdersPostgres(userId: string): Promise<CalculatedOrder[]> {
-    const { orders, items } = await dbOps.getRawOrdersAndItems(userId);
+    const { orders: rawOrders, items: rawItems } = await dbOps.getRawOrdersAndItems(userId);
     const costs = await dbOps.getUserCosts(userId);
     const accounts = await dbOps.getUserMLAccounts(userId);
-
+    const profiles = await dbOps.getStateTaxProfiles();
+  
     // Map cost to a lookup dictionary for rapid search
     const costMap = new Map<string, ProductCost>();
     costs.forEach(c => {
       costMap.set(c.sku.toUpperCase(), c);
     });
-
+  
     const accountMap = new Map<string, string>();
     accounts.forEach(acc => {
       accountMap.set(acc.id, acc.nickname);
     });
+  
+    const profileMap = new Map<string, StateTaxProfile>();
+    profiles.forEach(p => {
+      if (p.active) {
+        profileMap.set(p.state_code.toUpperCase(), p);
+      }
+    });
 
-    // Group items by order
+    const fallbackProfile: StateTaxProfile = {
+      state_code: "MEDIAN",
+      icms_factor: 0.0721,
+      difal_factor: 0.1305,
+      total_factor: 0.2044,
+      source_type: "median",
+      active: true
+    };
+  
+    // Group items by order_id
     const itemsByOrder = new Map<string, OrderItem[]>();
-    items.forEach(item => {
+    rawItems.forEach(item => {
       const arr = itemsByOrder.get(item.order_id) || [];
       arr.push(item);
       itemsByOrder.set(item.order_id, arr);
     });
-
-    return orders.map(order => {
+  
+    // First map all orders individually with their items, costs and local tax calculations
+    const mappedOrders = rawOrders.map(order => {
       const parentAccountNickname = accountMap.get(order.ml_account_id) || "Desconhecida";
       const orderItems = itemsByOrder.get(order.id) || [];
-
+  
       let totalCostOfOrder = 0;
       let hasPendingCost = false;
-
+  
       const itemsWithCosts = orderItems.map(item => {
         const skuUpper = item.sku.toUpperCase();
         const matchedCost = costMap.get(skuUpper);
         
         let costUnit = matchedCost ? Number(matchedCost.cost_unitary) : 0;
         let costTotal = costUnit * item.quantity;
-
+  
         if (!matchedCost) {
           hasPendingCost = true;
           costUnit = 0;
           costTotal = 0;
         }
-
+  
         totalCostOfOrder += costTotal;
-
+  
         return {
           sku: item.sku,
           product_name: item.product_name,
@@ -298,52 +486,200 @@ async function startServer() {
           cost_total: costTotal
         };
       });
-
-      const revenue_gross = Number(order.total_amount); 
+  
+      // Destination state profile estimation
+      const stateCode = normalizeStateCode(order.shipping_state);
+      let profile = profileMap.get(stateCode);
+      if (!profile) {
+        profile = fallbackProfile;
+      }
+  
+      const total_amount_num = Number(order.total_amount);
       const isCancelled = order.status.toLowerCase() === "cancelled";
       
-      const shipCostDetail = order.shipping_cost_detail !== undefined && order.shipping_cost_detail !== null ? Number(order.shipping_cost_detail) : 0;
-      const saldo_liquido_envio = Number(order.shipping_amount) - shipCostDetail;
-
-      // Net Revenue formula: Faturamento Bruto (Itens) - Descontos / Cupons Co-financiados - Taxas & Comissões Mercado Livre - Saldo Líquido de Envio
-      const revenue_net = isCancelled ? 0 : (Number(order.total_amount) - Number(order.discount_amount) - Number(order.marketplace_fee_amount) - saldo_liquido_envio);
-      const computedTotalCost = isCancelled ? 0 : totalCostOfOrder;
-      const profit = isCancelled ? 0 : revenue_net - computedTotalCost;
-      const margin = isCancelled ? 0 : (revenue_net > 0 ? (profit / revenue_net) : 0);
-
-      const summary: OrderFinancialSummary = {
-        id: `summary_${order.id}`,
-        order_id: order.id,
-        revenue_gross,
-        revenue_net,
-        total_cost: computedTotalCost,
-        gross_profit: profit,
-        margin_percent: margin,
-        updated_at: order.updated_at
-      };
-
+      const taxFactor = profile.total_factor;
+      const tax_cost = isCancelled ? 0 : (total_amount_num * profile.icms_factor);
+      const difal_factor = profile.difal_factor;
+      const difal_cost = isCancelled ? 0 : (total_amount_num * profile.difal_factor);
+  
       return {
         id: order.id,
         ml_order_id: order.ml_order_id,
         status: order.status,
         order_date: order.order_date,
-        total_amount: Number(order.total_amount),
+        total_amount: total_amount_num,
         shipping_amount: Number(order.shipping_amount),
         discount_amount: Number(order.discount_amount),
         marketplace_fee_amount: Number(order.marketplace_fee_amount),
-        net_amount: revenue_net,
         nickname: parentAccountNickname,
         items: itemsWithCosts,
-        financial_summary: summary,
-        cost_pending: hasPendingCost,
-        pack_id: order.pack_id || undefined,
+        totalCostOfOrder,
+        hasPendingCost,
+        pack_id: order.pack_id ? String(order.pack_id).trim() : undefined,
         shipping_city: order.shipping_city || undefined,
         shipping_municipality: order.shipping_municipality || undefined,
         shipping_state: order.shipping_state || undefined,
-        shipping_cost_detail: order.shipping_cost_detail !== undefined && order.shipping_cost_detail !== null ? Number(order.shipping_cost_detail) : undefined,
-        ml_shipment_id: order.ml_shipment_id || undefined
+        shipping_cost_detail: order.shipping_cost_detail !== undefined && order.shipping_cost_detail !== null ? Number(order.shipping_cost_detail) : 0,
+        ml_shipment_id: order.ml_shipment_id || undefined,
+        ml_account_id: order.ml_account_id,
+        updated_at: order.updated_at,
+        taxFactor,
+        tax_cost,
+        difal_factor,
+        difal_cost
       };
     });
+
+    // Group orders by pack_id if defineable
+    const finalOrders: CalculatedOrder[] = [];
+    const packMap = new Map<string, typeof mappedOrders>();
+
+    for (const o of mappedOrders) {
+      if (o.pack_id && o.pack_id !== "") {
+        const arr = packMap.get(o.pack_id) || [];
+        arr.push(o);
+        packMap.set(o.pack_id, arr);
+      } else {
+        // Case 1: Order without pack_id (base on order only)
+        finalOrders.push(buildOrderFromCollection([o]));
+      }
+    }
+
+    // Process all pack collections (Case 2: Sum order info inside pack)
+    for (const [packId, ordersInPack] of packMap.entries()) {
+      finalOrders.push(buildOrderFromCollection(ordersInPack, packId));
+    }
+
+    return finalOrders;
+
+    // Helper to consolidate order objects from collections
+    function buildOrderFromCollection(collection: typeof mappedOrders, packId?: string): CalculatedOrder {
+      if (collection.length === 1 && !packId) {
+        // Quick path for individual orders without pack
+        const order = collection[0];
+        const isCancelled = order.status.toLowerCase() === "cancelled";
+        const shipping_cost_detail = order.shipping_cost_detail;
+        
+        const revenue_net = isCancelled ? 0 : (order.total_amount - order.discount_amount - order.marketplace_fee_amount - shipping_cost_detail);
+        const computedTotalCost = isCancelled ? 0 : order.totalCostOfOrder;
+        
+        // Exact formula: Net revenue - total Cost of Items - estimated tax factor cost - DIFAL (13%)
+        const difal_cost = isCancelled ? 0 : (order.difal_cost || 0);
+        const profit = isCancelled ? 0 : (revenue_net - computedTotalCost - order.tax_cost - difal_cost);
+        const margin = isCancelled ? 0 : (order.total_amount > 0 ? (profit / order.total_amount) : 0);
+
+        const summary: OrderFinancialSummary = {
+          id: `summary_${order.id}`,
+          order_id: order.id,
+          revenue_gross: order.total_amount,
+          revenue_net,
+          total_cost: computedTotalCost,
+          gross_profit: profit,
+          margin_percent: margin,
+          updated_at: order.updated_at,
+          tax_factor: order.taxFactor,
+          tax_cost: order.tax_cost,
+          difal_factor: order.difal_factor,
+          difal_cost
+        };
+
+        return {
+          id: order.id,
+          ml_order_id: order.ml_order_id,
+          status: order.status,
+          order_date: order.order_date,
+          total_amount: order.total_amount,
+          shipping_amount: order.shipping_amount,
+          discount_amount: order.discount_amount,
+          marketplace_fee_amount: order.marketplace_fee_amount,
+          net_amount: revenue_net,
+          nickname: order.nickname,
+          items: order.items,
+          financial_summary: summary,
+          cost_pending: order.hasPendingCost,
+          pack_id: undefined,
+          shipping_city: order.shipping_city,
+          shipping_municipality: order.shipping_municipality,
+          shipping_state: order.shipping_state,
+          shipping_cost_detail: order.shipping_cost_detail > 0 ? order.shipping_cost_detail : undefined,
+          ml_shipment_id: order.ml_shipment_id
+        };
+      }
+
+      // Pack consolidation flow
+      const sorted = [...collection].sort((a, b) => a.id.localeCompare(b.id));
+      const primary = sorted[0];
+
+      // Sum gross / discount / commissions / cost inside standard pack
+      const total_amount = sorted.reduce((sum, o) => sum + o.total_amount, 0);
+      const discount_amount = sorted.reduce((sum, o) => sum + o.discount_amount, 0);
+      const marketplace_fee_amount = sorted.reduce((sum, o) => sum + o.marketplace_fee_amount, 0);
+      const totalCostOfPack = sorted.reduce((sum, o) => sum + o.totalCostOfOrder, 0);
+      const hasPendingCost = sorted.some(o => o.hasPendingCost);
+
+      // Take the shipping limits (the package is unique, so shipping details shouldn't be summed)
+      const shipping_amount = Math.max(...sorted.map(o => o.shipping_amount));
+      const shipping_cost_detail = Math.max(...sorted.map(o => o.shipping_cost_detail));
+
+      // Sum the tax costs and difal costs of each individual items inside of standard package
+      const tax_cost = sorted.reduce((sum, o) => sum + o.tax_cost, 0);
+      const difal_cost = sorted.reduce((sum, o) => sum + (o.difal_cost || 0), 0);
+
+      // Concatenate all item entries
+      const items: any[] = [];
+      sorted.forEach(o => {
+        items.push(...o.items);
+      });
+
+      // Join standard order IDs inside the pack with safe separators
+      const ml_order_id = Array.from(new Set(sorted.map(o => o.ml_order_id))).join(" + ");
+
+      const isCancelled = sorted.every(o => o.status.toLowerCase() === "cancelled");
+      const status = isCancelled ? "cancelled" : (sorted.find(o => o.status.toLowerCase() !== "cancelled")?.status || primary.status);
+
+      const revenue_net = isCancelled ? 0 : (total_amount - discount_amount - marketplace_fee_amount - shipping_cost_detail);
+      const computedTotalCost = isCancelled ? 0 : totalCostOfPack;
+      
+      const profit = isCancelled ? 0 : (revenue_net - computedTotalCost - tax_cost - difal_cost);
+      const margin = isCancelled ? 0 : (total_amount > 0 ? (profit / total_amount) : 0);
+
+      const summary: OrderFinancialSummary = {
+        id: `summary_pack_${packId || primary.id}`,
+        order_id: primary.id,
+        revenue_gross: total_amount,
+        revenue_net,
+        total_cost: computedTotalCost,
+        gross_profit: profit,
+        margin_percent: margin,
+        updated_at: primary.updated_at,
+        tax_factor: primary.taxFactor,
+        tax_cost,
+        difal_factor: primary.difal_factor,
+        difal_cost
+      };
+
+      return {
+        id: primary.id,
+        ml_order_id,
+        status,
+        order_date: primary.order_date,
+        total_amount,
+        shipping_amount,
+        discount_amount,
+        marketplace_fee_amount,
+        net_amount: revenue_net,
+        nickname: primary.nickname,
+        items,
+        financial_summary: summary,
+        cost_pending: hasPendingCost,
+        pack_id: packId,
+        shipping_city: primary.shipping_city,
+        shipping_municipality: primary.shipping_municipality,
+        shipping_state: primary.shipping_state,
+        shipping_cost_detail: shipping_cost_detail > 0 ? shipping_cost_detail : undefined,
+        ml_shipment_id: primary.ml_shipment_id
+      };
+    }
   }
 
   // ==================== 7.1. Auth Endpoints ====================
@@ -629,6 +965,447 @@ async function startServer() {
     }
   });
 
+  // ==================== 7.2.5. Products Endpoints ====================
+
+  // Helper to normalize Brazilian logistics names from Mercado Livre
+  function normalizeLogisticTypeName(logisticType: string | null | undefined, shippingMode: string | null | undefined): string {
+    const typeKey = (logisticType || "").toLowerCase().trim();
+    const modeKey = (shippingMode || "").toLowerCase().trim();
+
+    if (typeKey === "fulfillment") return "Mercado Envios Full";
+    if (typeKey === "cross_docking") return "Mercado Envios Coleta";
+    if (typeKey === "drop_off") return "Mercado Envios Agência";
+    if (typeKey === "xd_drop_off") return "Mercado Envios Agência";
+    if (typeKey === "self_service" || typeKey === "flex") return "Mercado Envios Flex";
+    if (typeKey === "custom") return "Personalizado";
+    if (modeKey === "me2") return "Mercado Envios Coletivo";
+    if (modeKey === "me1") return "Mercado Envios 1";
+    if (modeKey === "custom") return "Personalizado";
+    return "Retirada em Mãos / A Combinar";
+  }
+
+  // Helper to compute median of a list of numbers
+  function calculateMedian(values: number[]): number {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 !== 0) {
+      return sorted[mid];
+    }
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  app.get("/api/products", requireAuth, async (req, res) => {
+    try {
+      const { accountId, search, status, limit = "40", offset = "0" } = req.query;
+
+      // 1. Get user accounts
+      let accounts = await dbOps.getUserMLAccounts(currentUserSession!);
+
+      // Filter by accountId if specified
+      if (accountId) {
+        accounts = accounts.filter(acc => acc.id === accountId);
+      }
+
+      if (accounts.length === 0) {
+        return res.json({ products: [], total: 0 });
+      }
+
+      const itemsLimit = Math.min(Number(limit), 100);
+      const itemsOffset = Number(offset);
+
+      let allItemIds: { id: string; accountNickname: string; accountId: string }[] = [];
+
+      // For each account, retrieve list of item IDs
+      for (const acc of accounts) {
+        let token = acc.access_token;
+        try {
+          token = await refreshAccountTokenIfNeeded(acc.id);
+        } catch (err: any) {
+          console.warn(`[PRODUCTS] Failed to refresh token for account ${acc.id}:`, err.message);
+        }
+
+        // Search active/inactive/pending items
+        let searchUrl = `https://api.mercadolibre.com/users/${acc.ml_user_id}/items/search?limit=100`;
+        if (search) {
+          searchUrl += `&q=${encodeURIComponent(search as string)}`;
+        }
+        if (status) {
+          searchUrl += `&status=${encodeURIComponent(status as string)}`;
+        }
+
+        let mlRes = await fetch(searchUrl, {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+
+        if ((mlRes.status === 401 || mlRes.status === 403) && !acc.access_token.startsWith("SIM_") && !acc.access_token.startsWith("MOCK_")) {
+          console.log(`[PRODUCTS] Received ${mlRes.status} on searching items. Retrying with direct forced refresh...`);
+          try {
+            token = await refreshAccountTokenIfNeeded(acc.id, true);
+            mlRes = await fetch(searchUrl, {
+              headers: { "Authorization": `Bearer ${token}` }
+            });
+          } catch (rErr: any) {
+            console.warn(`[PRODUCTS] Forced refresh for search failed: ${rErr.message}`);
+          }
+        }
+
+        if (!mlRes.ok) {
+          console.warn(`[PRODUCTS] Skip search items call because response returned non-2xx: ${mlRes.status}`);
+          continue;
+        }
+
+        const searchResult = await mlRes.json();
+        const results = searchResult.results || []; // Array of strings (Item IDs)
+        results.forEach((id: string) => {
+          allItemIds.push({ id, accountNickname: acc.nickname, accountId: acc.id });
+        });
+      }
+
+      // Total count across selected integrated accounts
+      const totalCount = allItemIds.length;
+
+      // Apply pagination on IDs first
+      const paginatedIds = allItemIds.slice(itemsOffset, itemsOffset + itemsLimit);
+
+      if (paginatedIds.length === 0) {
+        return res.json({ products: [], total: totalCount });
+      }
+
+      const accountTokens = new Map<string, string>();
+      for (const acc of accounts) {
+        let token = acc.access_token;
+        try {
+          token = await refreshAccountTokenIfNeeded(acc.id);
+        } catch {}
+        accountTokens.set(acc.id, token);
+      }
+
+      const productDetailList: any[] = [];
+
+      // Multiget is best grouped by accountId
+      const groupedByAccount = new Map<string, typeof paginatedIds>();
+      for (const p of paginatedIds) {
+        const arr = groupedByAccount.get(p.accountId) || [];
+        arr.push(p);
+        groupedByAccount.set(p.accountId, arr);
+      }
+
+      // Category Cache to resolve category names to minimize repeat API requests
+      const categoryCache = new Map<string, string>();
+      const getCategoryName = async (catId: string, token: string) => {
+        if (!catId) return "Não categorizado";
+        if (categoryCache.has(catId)) return categoryCache.get(catId);
+        try {
+          const catRes = await fetch(`https://api.mercadolibre.com/categories/${catId}`, {
+            headers: { "Authorization": `Bearer ${token}` }
+          });
+          if (catRes.ok) {
+            const catJson = await catRes.json();
+            categoryCache.set(catId, catJson.name);
+            return catJson.name;
+          }
+        } catch (err) {
+          console.warn(`Failed fetching category name for ${catId}:`, err);
+        }
+        return catId; // fallback to ID
+      };
+
+      for (const [accId, pEntries] of groupedByAccount.entries()) {
+        let token = accountTokens.get(accId) || "";
+        const idsQuery = pEntries.map(p => p.id).join(",");
+
+        // Fetch details in bulk (up to 20 per call as recommended by Meli API limit rules)
+        const detailsUrl = `https://api.mercadolibre.com/items?ids=${idsQuery}`;
+        let detRes = await fetch(detailsUrl, {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+
+        if ((detRes.status === 401 || detRes.status === 403) && !token.startsWith("SIM_") && !token.startsWith("MOCK_")) {
+          console.log(`[PRODUCTS] Received ${detRes.status} on details multiget. Retrying with direct forced refresh...`);
+          try {
+            token = await refreshAccountTokenIfNeeded(accId, true);
+            detRes = await fetch(detailsUrl, {
+              headers: { "Authorization": `Bearer ${token}` }
+            });
+          } catch (rErr: any) {
+            console.warn(`[PRODUCTS] Forced refresh for bulk items failed: ${rErr.message}`);
+          }
+        }
+
+        if (detRes.ok) {
+          const resultsArray = await detRes.json(); // array of { code: 200, body: {...} }
+          for (const itemWrapper of resultsArray) {
+            if (itemWrapper.code === 200 && itemWrapper.body) {
+              const body = itemWrapper.body;
+              const entry = pEntries.find(p => p.id === body.id);
+
+              // Extract attributes like SKU
+              let sku = "N/A";
+              if (body.seller_custom_field) {
+                sku = body.seller_custom_field;
+              } else if (body.attributes) {
+                const sellerSkuAttr = body.attributes.find((a: any) => a.id === "SELLER_SKU" || a.name?.toUpperCase() === "SKU");
+                if (sellerSkuAttr && sellerSkuAttr.value_name) {
+                  sku = sellerSkuAttr.value_name;
+                }
+              }
+
+              // Pad SKU based on the user's SKU padding rule if it is a numeric SKU below 10000
+              sku = normalizeSku(sku);
+
+              // Resolve Category Name
+              const categoryName = await getCategoryName(body.category_id, token);
+
+              // Standardized logistics name
+              const normalizedLogistics = normalizeLogisticTypeName(body.shipping?.logistic_type, body.shipping?.mode);
+
+              productDetailList.push({
+                id: body.id,
+                accountId: accId,
+                title: body.title,
+                price: body.price,
+                original_price: body.original_price,
+                currency_id: body.currency_id,
+                thumbnail: body.thumbnail,
+                permalink: body.permalink,
+                status: body.status,
+                condition: body.condition,
+                available_quantity: body.available_quantity,
+                sold_quantity: body.sold_quantity,
+                category_id: body.category_id,
+                category_name: categoryName,
+                sku: sku,
+                listing_type_id: body.listing_type_id,
+                shipping_mode: body.shipping?.mode,
+                shipping_free: body.shipping?.free_shipping,
+                logistic_type: body.shipping?.logistic_type,
+                normalized_logistics: normalizedLogistics,
+                pictures: body.pictures?.slice(0, 5).map((pic: any) => pic.url || pic.secure_url) || [],
+                accountNickname: entry ? entry.accountNickname : "Conta integrada",
+                warranty: body.warranty,
+                buying_mode: body.buying_mode,
+                date_created: body.date_created,
+                health: body.health,
+                video_id: body.video_id,
+                accepts_mercadopago: body.accepts_mercadopago,
+                attributes: body.attributes || []
+              });
+            }
+          }
+        } else {
+          console.warn(`[PRODUCTS] Skip bulk fetch call because response returned non-2xx: ${detRes.status}`);
+        }
+      }
+
+      // Batch calculate median billing statistics (last 3-month shipments & sales tax/fees) from historical Neon Postgres orders
+      const allSkusOnPage = Array.from(new Set(productDetailList.map(p => p.sku).filter(s => s && s !== "N/A")));
+      const skuStatsMap = new Map<string, { medianShipping: number; medianFee: number; salesCount: number }>();
+
+      if (allSkusOnPage.length > 0) {
+        try {
+          const statsQuery = `
+            SELECT 
+              i.sku,
+              o.shipping_cost_detail,
+              o.shipping_amount,
+              o.marketplace_fee_amount,
+              o.total_amount,
+              i.total_price,
+              i.quantity
+            FROM orders o
+            JOIN items i ON i.order_id = o.id
+            WHERE o.user_id = $1
+              AND i.sku = ANY($2)
+              AND o.order_date >= NOW() - INTERVAL '3 months'
+          `;
+          const statsRes = await pool.query(statsQuery, [currentUserSession!, allSkusOnPage]);
+          
+          // Group rows by SKU
+          const groupedBySku = new Map<string, any[]>();
+          for (const r of statsRes.rows) {
+            const upSku = r.sku.toUpperCase();
+            const arr = groupedBySku.get(upSku) || [];
+            arr.push(r);
+            groupedBySku.set(upSku, arr);
+          }
+
+          // Calculate medians for each SKU group
+          for (const [skuStr, rows] of groupedBySku.entries()) {
+            const shippingVals: number[] = [];
+            const feeVals: number[] = [];
+            let totalQty = 0;
+
+            for (const row of rows) {
+              const shipDetailNum = row.shipping_cost_detail !== null ? parseFloat(row.shipping_cost_detail) : null;
+              const shipAmountNum = row.shipping_amount !== null ? parseFloat(row.shipping_amount) : 0;
+              
+              const finalShipVal = (shipDetailNum !== null && shipDetailNum > 0) ? shipDetailNum : shipAmountNum;
+              shippingVals.push(finalShipVal);
+
+              const mtkFee = parseFloat(row.marketplace_fee_amount || "0");
+              const totPrice = parseFloat(row.total_price || "0");
+              const totAmt = parseFloat(row.total_amount || "1");
+              const qty = parseInt(row.quantity || "1");
+
+              // Compute proportional sales tax fee per item unit
+              const proportionalFee = (mtkFee * (totPrice / (totAmt || 1))) / (qty || 1);
+              feeVals.push(proportionalFee);
+
+              totalQty += qty;
+            }
+
+            skuStatsMap.set(skuStr, {
+              medianShipping: calculateMedian(shippingVals),
+              medianFee: calculateMedian(feeVals),
+              salesCount: totalQty
+            });
+          }
+        } catch (err: any) {
+          console.error("[PRODUCTS STATS] Failed to calculate median stats query:", err.message);
+        }
+      }
+
+      // Inject median stats into mapped listings
+      const productsWithStats = productDetailList.map(p => {
+        const stats = skuStatsMap.get(p.sku.toUpperCase()) || { medianShipping: 0, medianFee: 0, salesCount: 0 };
+        return {
+          ...p,
+          median_shipping: stats.medianShipping,
+          median_fee: stats.medianFee,
+          sales_count: stats.salesCount
+        };
+      });
+
+      res.json({
+        products: productsWithStats,
+        total: totalCount
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Erro ao buscar produtos: " + err.message });
+    }
+  });
+
+  // PUT Endpoint to update items directly in Mercado Livre with auto OAuth token refresh
+  app.put("/api/products/:id", requireAuth, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { 
+        accountId, 
+        title, 
+        price, 
+        available_quantity, 
+        status, 
+        video_id, 
+        warranty, 
+        sku 
+      } = req.body;
+
+      if (!accountId) {
+        return res.status(400).json({ error: "O identificador da conta integrada (accountId) é obrigatório." });
+      }
+
+      // Fetch the account to get tokens
+      const acc = await dbOps.getAccountById(accountId, currentUserSession!);
+      if (!acc) {
+        return res.status(404).json({ error: "Conta integrada não encontrada ou sem privilégio de acesso." });
+      }
+
+      let token = acc.access_token;
+      try {
+        token = await refreshAccountTokenIfNeeded(acc.id);
+      } catch (tokenErr: any) {
+        return res.status(401).json({ error: "Falha ao renovar token de acesso do Mercado Livre: " + tokenErr.message });
+      }
+
+      // Build edit payload
+      const updatePayload: any = {};
+      if (title !== undefined) updatePayload.title = title;
+      if (price !== undefined) updatePayload.price = Number(price);
+      if (available_quantity !== undefined) updatePayload.available_quantity = Number(available_quantity);
+      if (status !== undefined) updatePayload.status = status;
+      if (video_id !== undefined) updatePayload.video_id = video_id || null;
+      if (warranty !== undefined) updatePayload.warranty = warranty || null;
+
+      // Handle SKU / seller_custom_field and attributes
+      if (sku !== undefined) {
+        updatePayload.seller_custom_field = sku;
+
+        try {
+          // Fetch current attributes of the item to keep other parameters safe
+          const itemRes = await fetch(`https://api.mercadolibre.com/items/${id}`, {
+            headers: { "Authorization": `Bearer ${token}` }
+          });
+          if (itemRes.ok) {
+            const itemObj = await itemRes.json();
+            const originalAttributes = itemObj.attributes || [];
+            
+            const updatedAttributes = [...originalAttributes];
+            const skuIndex = updatedAttributes.findIndex(a => a.id === "SELLER_SKU");
+            if (skuIndex >= 0) {
+              updatedAttributes[skuIndex] = { ...updatedAttributes[skuIndex], value_name: sku };
+            } else {
+              updatedAttributes.push({ id: "SELLER_SKU", value_name: sku });
+            }
+            updatePayload.attributes = updatedAttributes;
+          }
+        } catch (attrsErr: any) {
+          console.warn(`[PRODUCTS EDIT] Warning while reading original attributes to merge SELLER_SKU:`, attrsErr.message);
+        }
+      }
+
+      console.log(`[PRODUCTS EDIT] Dispatching PUT request to Mercado Livre items API for ${id}:`, updatePayload);
+      const mlResponse = await fetch(`https://api.mercadolibre.com/items/${id}`, {
+        method: "PUT",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(updatePayload)
+      });
+
+      if (!mlResponse.ok) {
+        let errDetails: any = null;
+        let errorMessage = "Erro desconhecido retornado pela API do Mercado Livre.";
+        const rawText = await mlResponse.text();
+
+        try {
+          errDetails = JSON.parse(rawText);
+          errorMessage = errDetails.message || (errDetails.cause && errDetails.cause[0] && errDetails.cause[0].message) || errorMessage;
+        } catch (e) {
+          console.error(`[PRODUCTS EDIT FAIL] Mercado Livre returned non-JSON or HTML error payload. HTTP ${mlResponse.status}. Header snippet:`, rawText.substring(0, 400));
+          if (mlResponse.status === 403) {
+            errorMessage = "O Mercado Livre recusou a requisição devido a políticas de segurança (Erro 403 / PolicyAgent). Verifique se a conta integrada possui as permissões comerciais necessárias e se o anúncio permite modificações de preço neste momento.";
+          } else if (mlResponse.status === 401) {
+            errorMessage = "Sessão expirada ou não autorizada no Mercado Livre. Por favor, tente reconectar sua conta de integração nas configurações.";
+          } else {
+            errorMessage = `Erro de comunicação ou infraestrutura no Mercado Livre (Código HTTP ${mlResponse.status}).`;
+          }
+          errDetails = { status: mlResponse.status, rawSnippet: rawText.substring(0, 1000) };
+        }
+
+        console.error(`[PRODUCTS EDIT FAIL] Final parsed error message: ${errorMessage}`);
+        return res.status(mlResponse.status).json({
+          error: `O Mercado Livre recusou a atualização: ${errorMessage}`,
+          details: errDetails
+        });
+      }
+
+      const updatedItem = await mlResponse.json();
+      console.log(`[PRODUCTS EDIT SUCCESS] Successfully updated item ${id}.`);
+
+      return res.json({
+        success: true,
+        message: "Anúncio atualizado com sucesso no Mercado Livre!",
+        item: updatedItem
+      });
+
+    } catch (err: any) {
+      console.error("[PRODUCTS EDIT EXCEPTION] General error:", err);
+      res.status(500).json({ error: "Erro interno ao atualizar anúncio: " + err.message });
+    }
+  });
+
   // ==================== 7.3. Orders Endpoints ====================
 
   app.get("/api/orders", requireAuth, async (req, res) => {
@@ -745,6 +1522,134 @@ async function startServer() {
       });
     } catch (err: any) {
       res.status(500).json({ error: "Erro ao obter sumário financeiro: " + err.message });
+    }
+  });
+
+  // --- STATE TAX FACTORS API (BACKWARD COMPATIBILITY) ---
+  app.get("/api/tax-factors", requireAuth, async (req, res) => {
+    try {
+      const profiles = await dbOps.getStateTaxProfiles();
+      const factors = profiles.map(p => ({
+        id: `tax_${p.state_code.toLowerCase()}`,
+        state_code: p.state_code,
+        tax_factor: p.total_factor,
+        active: p.active
+      }));
+      res.json(factors);
+    } catch (err: any) {
+      res.status(500).json({ error: "Erro ao buscar fatores tributários de estados: " + err.message });
+    }
+  });
+
+  app.put("/api/tax-factors/:id", requireAuth, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { tax_factor, active } = req.body;
+      if (tax_factor === undefined || isNaN(Number(tax_factor))) {
+        return res.status(400).json({ error: "O fator tributário (tax_factor) é obrigatório e deve ser um número válido." });
+      }
+
+      // Resolve state code from ID (e.g., 'tax_sp' -> 'SP')
+      let stateCode = id.replace("tax_", "").toUpperCase();
+      if (stateCode.length !== 2) {
+        // Fallback search
+        const profiles = await dbOps.getStateTaxProfiles();
+        const found = profiles.find(p => p.state_code.toLowerCase() === id.replace("tax_", "").toLowerCase());
+        stateCode = found ? found.state_code : stateCode;
+      }
+
+      // Fetch existing profile or build new
+      const profiles = await dbOps.getStateTaxProfiles();
+      const existing = profiles.find(p => p.state_code.toUpperCase() === stateCode.toUpperCase());
+      
+      const newTotal = Number(tax_factor);
+      // For compatibility: set ICMS to total, DIFAL to 0 if SP, or preserve historical allocation if found
+      let activeVal = active !== false;
+      let icms = newTotal;
+      let difal = 0;
+      if (existing) {
+        if (stateCode === "SP") {
+          icms = newTotal;
+          difal = 0;
+        } else {
+          // Keep relative proportion if possible, else 50/50
+          const sum = existing.icms_factor + existing.difal_factor;
+          if (sum > 0) {
+            icms = newTotal * (existing.icms_factor / sum);
+            difal = newTotal * (existing.difal_factor / sum);
+          } else {
+            icms = newTotal * 0.5;
+            difal = newTotal * 0.5;
+          }
+        }
+      }
+
+      await dbOps.updateStateTaxProfile({
+        state_code: stateCode,
+        icms_factor: icms,
+        difal_factor: difal,
+        total_factor: newTotal,
+        source_type: "manual_override",
+        active: activeVal
+      });
+
+      res.json({ message: "Fator tributário do estado atualizado com sucesso" });
+    } catch (err: any) {
+      res.status(500).json({ error: "Erro ao atualizar fator tributário do estado: " + err.message });
+    }
+  });
+
+  // --- STATE TAX PROFILES API ---
+  app.get("/api/tax-profiles", requireAuth, async (req, res) => {
+    try {
+      const profiles = await dbOps.getStateTaxProfiles();
+      res.json(profiles);
+    } catch (err: any) {
+      res.status(500).json({ error: "Erro ao buscar perfis tributários: " + err.message });
+    }
+  });
+
+  app.put("/api/tax-profiles/:state_code", requireAuth, async (req, res) => {
+    try {
+      const { state_code } = req.params;
+      const { icms_factor, difal_factor, active, source_type, valid_from, valid_to, notes } = req.body;
+
+      if (icms_factor === undefined || isNaN(Number(icms_factor))) {
+        return res.status(400).json({ error: "A alíquota de ICMS (icms_factor) é obrigatória e deve ser um número válido." });
+      }
+      if (difal_factor === undefined || isNaN(Number(difal_factor))) {
+        return res.status(400).json({ error: "A alíquota de DIFAL (difal_factor) é obrigatória e deve ser um número válido." });
+      }
+
+      const icms = Number(icms_factor);
+      const difal = Number(difal_factor);
+      const total = icms + difal;
+
+      const profile: StateTaxProfile = {
+        state_code: state_code.toUpperCase(),
+        icms_factor: icms,
+        difal_factor: difal,
+        total_factor: total,
+        source_type: source_type || "manual_override",
+        active: active !== false,
+        valid_from,
+        valid_to,
+        notes
+      };
+
+      await dbOps.updateStateTaxProfile(profile);
+      res.json({ message: "Perfil tributário do estado atualizado com sucesso", profile });
+    } catch (err: any) {
+      res.status(500).json({ error: "Erro ao atualizar perfil tributário: " + err.message });
+    }
+  });
+
+  app.post("/api/orders/recalculate", requireAuth, async (req, res) => {
+    try {
+      await recalculate_order_profit(currentUserSession!);
+      res.json({ message: "Reprocessamento concluído! Todos os custos de pedidos e lucros estatais foram recalculados." });
+    } catch (err: any) {
+      res.status(500).json({ error: "Erro ao reprocessar os lucros dos pedidos: " + err.message });
     }
   });
 
@@ -1015,8 +1920,11 @@ async function startServer() {
       return res.status(400).json({ error: "Planilha vazia ou faltam colunas." });
     }
 
+    // Detect delimiter: if first line contains ';', split on ';' to avoid dividing numbers with comma decimals
+    const delimiter = lines[0].includes(";") ? ";" : ",";
+
     // Parse header column indexes
-    const header = lines[0].toLowerCase().split(/[;,]/);
+    const header = lines[0].toLowerCase().split(delimiter);
     const skuIdx = header.findIndex((h: string) => h.includes("sku"));
     const nameIdx = header.findIndex((h: string) => h.includes("product") || h.includes("name") || h.includes("nome") || h.includes("produto"));
     const costIdx = header.findIndex((h: string) => h.includes("cost") || h.includes("unitary") || h.includes("custo") || h.includes("unitario"));
@@ -1037,7 +1945,7 @@ async function startServer() {
         const line = lines[i].trim();
         if (!line) continue;
 
-        const columns = line.split(/[;,]/);
+        const columns = line.split(delimiter);
         let sku = columns[skuIdx]?.trim() || "";
         const rawCost = columns[costIdx]?.trim();
         const pName = nameIdx !== -1 ? columns[nameIdx]?.trim() : "Produto Importado";

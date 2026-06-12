@@ -1,4 +1,4 @@
-import { RefreshCw, CheckCircle, AlertTriangle, User } from "lucide-react";
+import { RefreshCw, CheckCircle, AlertTriangle, User, Menu, ChevronLeft } from "lucide-react";
 import { MercadoLivreAccount } from "../types";
 
 interface HeaderProps {
@@ -7,9 +7,19 @@ interface HeaderProps {
   syncing: boolean;
   onSync: () => void;
   syncSuccessMessage: string | null;
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
 }
 
-export default function Header({ currentTab, accounts, syncing, onSync, syncSuccessMessage }: HeaderProps) {
+export default function Header({ 
+  currentTab, 
+  accounts, 
+  syncing, 
+  onSync, 
+  syncSuccessMessage,
+  sidebarOpen,
+  onToggleSidebar
+}: HeaderProps) {
   const getPageTitle = () => {
     switch (currentTab) {
       case "dashboard":
@@ -18,6 +28,8 @@ export default function Header({ currentTab, accounts, syncing, onSync, syncSucc
         return "Gestão de Pedidos";
       case "costs":
         return "Painel de Custos";
+      case "products":
+        return "Gestão de Anúncios";
       case "integrations":
         return "Contas e Canais Integrados";
       default:
@@ -33,6 +45,8 @@ export default function Header({ currentTab, accounts, syncing, onSync, syncSucc
         return "Lista detalhada de compras efetuadas, comissões cobradas e apuração de lucro.";
       case "costs":
         return "Visualize custos por SKU de produtos e faça importações em lote (CSV).";
+      case "products":
+        return "Visualize miniaturas, preços, categorias oficiais, estoques e fichas técnicas de seus anúncios integrados.";
       case "integrations":
         return "Gerencie os tokens e credenciais das suas lojas oficiais conectadas.";
       default:
@@ -43,11 +57,25 @@ export default function Header({ currentTab, accounts, syncing, onSync, syncSucc
   const activeNicknames = accounts.filter(a => a.status === "active").map(a => a.nickname);
 
   return (
-    <header className="h-20 glass-header flex items-center justify-between px-8 fixed right-0 top-0 left-64 z-20">
-      {/* Title block */}
-      <div>
-        <h2 className="text-lg font-black text-white tracking-tight leading-none">{getPageTitle()}</h2>
-        <span className="text-[10px] text-white/40 font-bold block mt-1.5 uppercase tracking-widest">{getPageDesc()}</span>
+    <header className={`h-20 glass-header flex items-center justify-between px-8 fixed right-0 top-0 z-20 transition-all duration-300 ${sidebarOpen ? "left-64" : "left-0"}`}>
+      {/* Left section: Toggle + Title */}
+      <div className="flex items-center gap-4">
+        <button
+          onClick={onToggleSidebar}
+          className="p-2 bg-white/5 hover:bg-white/10 active:scale-95 text-white/70 hover:text-white rounded-xl transition-all duration-200 border border-white/5 focus:outline-none flex items-center justify-center cursor-pointer shadow-sm"
+          title={sidebarOpen ? "Ocultar menu lateral" : "Exibir menu lateral"}
+          id="btn-sidebar-toggle"
+        >
+          {sidebarOpen ? (
+            <ChevronLeft className="h-4.5 w-4.5" />
+          ) : (
+            <Menu className="h-4.5 w-4.5" />
+          )}
+        </button>
+        <div>
+          <h2 className="text-lg font-black text-white tracking-tight leading-none">{getPageTitle()}</h2>
+          <span className="text-[10px] text-white/40 font-bold block mt-1.5 uppercase tracking-widest">{getPageDesc()}</span>
+        </div>
       </div>
 
       {/* Integration controls */}
