@@ -1,25 +1,5 @@
-import { Pool, PoolConfig } from "pg";
-import { User, MercadoLivreAccount, Order, OrderItem, ProductCost, CostImportBatch, OrderFinancialSummary, StateTaxProfile, OrderTaxSummary } from "./shared/types";
+import { pool } from "../config/database";
 
-// Connection String provided by the user
-const NEON_DB_URL = "postgresql://neondb_owner:npg_kT5LIf7btgCz@ep-weathered-pond-aiuvi42a.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
-
-// Use environment variable DATABASE_URL if available, otherwise fallback to the user's connection string
-const connectionString = process.env.DATABASE_URL || NEON_DB_URL;
-
-const poolConfig: PoolConfig = {
-  connectionString,
-  ssl: {
-    rejectUnauthorized: false // Required for Neon serverless postgres connections
-  },
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
-};
-
-export const pool = new Pool(poolConfig);
-
-// Initialize DB schema and seed initial data if needed
 export async function initPostgres(): Promise<void> {
   const client = await pool.connect();
   try {
@@ -145,7 +125,7 @@ export async function initPostgres(): Promise<void> {
       );
     `);
 
-    // Ensure older databases get the new columns for shipment address, cost details, and tax estimates
+    // Ensure older databases get any new columns for shipment address, cost details, and tax estimates
     await client.query(`
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_city VARCHAR(255);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_municipality VARCHAR(255);
@@ -266,10 +246,9 @@ export async function initPostgres(): Promise<void> {
       console.log("Database initialized with user profile and key product costs.");
     }
 
-    // Active purge to make sure no pre-existing mock accounts or mock orders remain in database
+    // Active purge to make sure no pre-existing mock data remains
     console.log("Purging any pre-existing or residual simulated/mock data to clean up the workspace...");
     
-    // Purge items connected to mock orders
     await client.query(`
       DELETE FROM items WHERE order_id IN (
         SELECT id FROM orders WHERE ml_account_id IN (
@@ -301,9 +280,9 @@ export async function initPostgres(): Promise<void> {
       DELETE FROM accounts WHERE access_token LIKE 'MOCK_%' OR access_token LIKE 'SIM_%' OR id IN ('acc_1', 'acc_2')
     `);
 
-    console.log("Purging completed: Only real products and real synced orders/accounts are active in Neon Postgres!");
+    console.log("Purging completed.");
 
-    // One-time automatic backfill of order_tax_summary for any existing orders on startup
+    // Backfill of order_tax_summary for existing orders on startup if needed
     const summaryCheck = await client.query("SELECT COUNT(*) FROM order_tax_summary");
     const summaryCount = parseInt(summaryCheck.rows[0].count);
     if (summaryCount === 0) {
@@ -380,7 +359,7 @@ export async function initPostgres(): Promise<void> {
               calculated_at = CURRENT_TIMESTAMP
           `, [o.id, o.shipping_state || "Indefinido", tax_factor_applied, icms_estimated, difal_estimated, tax_cost_total, calcMode]);
         }
-        console.log(`Successfully backfilled ${ordersRes.rows.length} orders with state tax summaries.`);
+        console.log(`Successfully backfilled ${ordersRes.rows.length} orders.`);
       }
     }
   } catch (err) {
@@ -390,362 +369,3 @@ export async function initPostgres(): Promise<void> {
     client.release();
   }
 }
-
-// Database helper operations
-export const dbOps = {
-  // --- USERS ---
-  async findUserByEmail(email: string): Promise<User | null> {
-    const res = await pool.query("SELECT * FROM users WHERE LOWER(email) = LOWER($1)", [email]);
-    return res.rows[0] || null;
-  },
-
-  async findUserById(id: string): Promise<User | null> {
-    const res = await pool.query("SELECT * FROM users WHERE id = $1", [id]);
-    return res.rows[0] || null;
-  },
-
-  async createUser(user: User): Promise<User> {
-    await pool.query(
-      `INSERT INTO users (id, name, email, password_hash, created_at, updated_at) 
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [user.id, user.name, user.email, user.password_hash, user.created_at, user.updated_at]
-    );
-    return user;
-  },
-
-  // --- ACCOUNTS ---
-  async getUserMLAccounts(userId: string): Promise<MercadoLivreAccount[]> {
-    const res = await pool.query("SELECT * FROM accounts WHERE user_id = $1 ORDER BY nickname ASC", [userId]);
-    return res.rows;
-  },
-
-  async getAccountById(id: string, userId: string): Promise<MercadoLivreAccount | null> {
-    const res = await pool.query("SELECT * FROM accounts WHERE id = $1 AND user_id = $2", [id, userId]);
-    return res.rows[0] || null;
-  },
-
-  async createMLAccount(acc: MercadoLivreAccount): Promise<MercadoLivreAccount> {
-    await pool.query(
-      `INSERT INTO accounts (id, user_id, nickname, access_token, refresh_token, token_expires_at, ml_user_id, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       ON CONFLICT (id) DO UPDATE SET
-         user_id = EXCLUDED.user_id,
-         nickname = EXCLUDED.nickname,
-         access_token = EXCLUDED.access_token,
-         refresh_token = EXCLUDED.refresh_token,
-         token_expires_at = EXCLUDED.token_expires_at,
-         ml_user_id = EXCLUDED.ml_user_id,
-         status = EXCLUDED.status,
-         updated_at = EXCLUDED.updated_at`,
-      [acc.id, acc.user_id, acc.nickname, acc.access_token, acc.refresh_token, acc.token_expires_at, acc.ml_user_id, acc.status, acc.created_at, acc.updated_at]
-    );
-    return acc;
-  },
-
-  async updateMLAccountTokens(id: string, accessToken: string, refreshToken: string, expiresAt: string): Promise<void> {
-    await pool.query(
-      `UPDATE accounts 
-       SET access_token = $1, refresh_token = $2, token_expires_at = $3, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $4`,
-      [accessToken, refreshToken, expiresAt, id]
-    );
-  },
-
-  async deleteMLAccount(id: string, userId: string): Promise<void> {
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-
-      // Retrieve all order IDs for this integration account
-      const ordersRes = await client.query("SELECT id FROM orders WHERE ml_account_id = $1 AND user_id = $2", [id, userId]);
-      const orderIds = ordersRes.rows.map((row: any) => row.id);
-
-      if (orderIds.length > 0) {
-        // Manually delete items linked to these orders
-        await client.query("DELETE FROM items WHERE order_id = ANY($1)", [orderIds]);
-        // Manually delete the orders
-        await client.query("DELETE FROM orders WHERE ml_account_id = $1 AND user_id = $2", [id, userId]);
-      }
-
-      // Finally delete the account
-      await client.query("DELETE FROM accounts WHERE id = $1 AND user_id = $2", [id, userId]);
-
-      await client.query("COMMIT");
-    } catch (e) {
-      await client.query("ROLLBACK");
-      throw e;
-    } finally {
-      client.release();
-    }
-  },
-
-  // --- COSTS ---
-  async getUserCosts(userId: string): Promise<ProductCost[]> {
-    const res = await pool.query("SELECT * FROM costs WHERE user_id = $1 ORDER BY sku ASC", [userId]);
-    return res.rows;
-  },
-
-  async getCostBySku(userId: string, sku: string): Promise<ProductCost | null> {
-    const res = await pool.query("SELECT * FROM costs WHERE user_id = $1 AND UPPER(sku) = UPPER($2)", [userId, sku]);
-    return res.rows[0] || null;
-  },
-
-  async upsertProductCost(cost: ProductCost): Promise<void> {
-    await pool.query(
-      `INSERT INTO costs (id, user_id, sku, product_name, cost_unitary, currency, source_file_name, imported_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       ON CONFLICT (user_id, sku) DO UPDATE 
-       SET product_name = EXCLUDED.product_name,
-           cost_unitary = EXCLUDED.cost_unitary,
-           currency = EXCLUDED.currency,
-           source_file_name = EXCLUDED.source_file_name,
-           imported_at = EXCLUDED.imported_at,
-           updated_at = CURRENT_TIMESTAMP`,
-      [cost.id, cost.user_id, cost.sku.toUpperCase(), cost.product_name, cost.cost_unitary, cost.currency, cost.source_file_name, cost.imported_at, cost.created_at, cost.updated_at]
-    );
-  },
-
-  async updateProductCostById(id: string, userId: string, productName: string, costUnitary: number, currency: string, importedAt: string): Promise<void> {
-    await pool.query(
-      `UPDATE costs 
-       SET product_name = $1, cost_unitary = $2, currency = $3, imported_at = $4, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $5 AND user_id = $6`,
-      [productName, costUnitary, currency, importedAt, id, userId]
-    );
-  },
-
-  async deleteProductCost(id: string, userId: string): Promise<void> {
-    await pool.query("DELETE FROM costs WHERE id = $1 AND user_id = $2", [id, userId]);
-  },
-
-  // --- BATCHES ---
-  async getUserBatches(userId: string): Promise<CostImportBatch[]> {
-    const res = await pool.query("SELECT * FROM batches WHERE user_id = $1 ORDER BY created_at DESC", [userId]);
-    return res.rows;
-  },
-
-  async createImportBatch(batch: CostImportBatch): Promise<void> {
-    await pool.query(
-      `INSERT INTO batches (id, user_id, file_name, file_type, total_rows, inserted_rows, updated_rows, failed_rows, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [batch.id, batch.user_id, batch.file_name, batch.file_type, batch.total_rows, batch.inserted_rows, batch.updated_rows, batch.failed_rows, batch.created_at]
-    );
-  },
-
-  // --- ORDERS & ITEMS ---
-  async getRawOrdersAndItems(userId: string): Promise<{ orders: Order[]; items: OrderItem[] }> {
-    const ordersRes = await pool.query("SELECT * FROM orders WHERE user_id = $1", [userId]);
-    const itemsRes = await pool.query(
-      `SELECT items.* FROM items 
-       JOIN orders ON items.order_id = orders.id 
-       WHERE orders.user_id = $1`,
-      [userId]
-    );
-    return {
-      orders: ordersRes.rows,
-      items: itemsRes.rows
-    };
-  },
-
-  async getOrderById(orderId: string, userId: string): Promise<Order | null> {
-    const res = await pool.query("SELECT * FROM orders WHERE id = $1 AND user_id = $2", [orderId, userId]);
-    return res.rows[0] || null;
-  },
-
-  async getOrderItems(orderId: string): Promise<OrderItem[]> {
-    const res = await pool.query("SELECT * FROM items WHERE order_id = $1 ORDER BY id ASC", [orderId]);
-    return res.rows;
-  },
-
-  async saveOrderWithItems(order: Order, items: OrderItem[]): Promise<void> {
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      
-      // Upsert order
-      await client.query(
-        `INSERT INTO orders (id, user_id, ml_account_id, ml_order_id, status, order_date, total_amount, shipping_amount, discount_amount, marketplace_fee_amount, net_amount, pack_id, shipping_city, shipping_municipality, shipping_state, shipping_cost_detail, ml_shipment_id, tax_factor, tax_cost, difal_factor, difal_cost, profit, margin_percent, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
-         ON CONFLICT (id) DO UPDATE 
-         SET status = EXCLUDED.status,
-             total_amount = EXCLUDED.total_amount,
-             shipping_amount = EXCLUDED.shipping_amount,
-             discount_amount = EXCLUDED.discount_amount,
-             marketplace_fee_amount = EXCLUDED.marketplace_fee_amount,
-             net_amount = EXCLUDED.net_amount,
-             pack_id = EXCLUDED.pack_id,
-             shipping_city = EXCLUDED.shipping_city,
-             shipping_municipality = EXCLUDED.shipping_municipality,
-             shipping_state = EXCLUDED.shipping_state,
-             shipping_cost_detail = EXCLUDED.shipping_cost_detail,
-             ml_shipment_id = EXCLUDED.ml_shipment_id,
-             tax_factor = EXCLUDED.tax_factor,
-             tax_cost = EXCLUDED.tax_cost,
-             difal_factor = EXCLUDED.difal_factor,
-             difal_cost = EXCLUDED.difal_cost,
-             profit = EXCLUDED.profit,
-             margin_percent = EXCLUDED.margin_percent,
-             updated_at = CURRENT_TIMESTAMP`,
-        [
-          order.id, order.user_id, order.ml_account_id, order.ml_order_id, order.status, order.order_date,
-          order.total_amount, order.shipping_amount, order.discount_amount, order.marketplace_fee_amount,
-          order.net_amount, order.pack_id,
-          order.shipping_city || null, order.shipping_municipality || null, order.shipping_state || null,
-          order.shipping_cost_detail !== undefined ? order.shipping_cost_detail : null,
-          order.ml_shipment_id || null,
-          (order as any).tax_factor !== undefined ? (order as any).tax_factor : null,
-          (order as any).tax_cost !== undefined ? (order as any).tax_cost : null,
-          (order as any).difal_factor !== undefined ? (order as any).difal_factor : null,
-          (order as any).difal_cost !== undefined ? (order as any).difal_cost : null,
-          (order as any).profit !== undefined ? (order as any).profit : null,
-          (order as any).margin_percent !== undefined ? (order as any).margin_percent : null,
-          order.created_at, order.updated_at
-        ]
-      );
-
-      // Save items
-      for (const item of items) {
-        await client.query(
-          `INSERT INTO items (id, order_id, sku, product_name, quantity, unit_price, total_price, cost_unitary_snapshot, cost_total_snapshot, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-           ON CONFLICT (id) DO UPDATE 
-           SET quantity = EXCLUDED.quantity,
-               unit_price = EXCLUDED.unit_price,
-               total_price = EXCLUDED.total_price,
-               cost_unitary_snapshot = EXCLUDED.cost_unitary_snapshot,
-               cost_total_snapshot = EXCLUDED.cost_total_snapshot,
-               updated_at = CURRENT_TIMESTAMP`,
-          [
-            item.id, item.order_id, item.sku, item.product_name, item.quantity, item.unit_price, item.total_price,
-            item.cost_unitary_snapshot || null, item.cost_total_snapshot || null, item.created_at, item.updated_at
-          ]
-        );
-      }
-
-      await client.query("COMMIT");
-    } catch (e) {
-      await client.query("ROLLBACK");
-      throw e;
-    } finally {
-      client.release();
-    }
-  },
-
-  // --- STATE TAX FACTORS ---
-  async getStateTaxFactors(): Promise<any[]> {
-    const res = await pool.query("SELECT * FROM state_tax_factors ORDER BY state_code ASC");
-    return res.rows;
-  },
-
-  async updateStateTaxFactor(id: string, taxFactor: number, active: boolean): Promise<void> {
-    await pool.query(
-      `UPDATE state_tax_factors
-       SET tax_factor = $1, active = $2, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $3`,
-      [taxFactor, active, id]
-    );
-  },
-
-  // --- STATE TAX PROFILES ---
-  async getStateTaxProfiles(): Promise<StateTaxProfile[]> {
-    const res = await pool.query("SELECT * FROM state_tax_profile ORDER BY state_code ASC");
-    return res.rows.map(row => ({
-      state_code: row.state_code,
-      icms_factor: Number(row.icms_factor),
-      difal_factor: Number(row.difal_factor),
-      total_factor: Number(row.total_factor),
-      source_type: row.source_type,
-      active: row.active,
-      valid_from: row.valid_from,
-      valid_to: row.valid_to,
-      notes: row.notes
-    }));
-  },
-
-  async updateStateTaxProfile(profile: StateTaxProfile): Promise<void> {
-    await pool.query(
-      `INSERT INTO state_tax_profile (state_code, icms_factor, difal_factor, total_factor, source_type, active, valid_from, valid_to, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (state_code) DO UPDATE SET
-         icms_factor = EXCLUDED.icms_factor,
-         difal_factor = EXCLUDED.difal_factor,
-         total_factor = EXCLUDED.total_factor,
-         source_type = EXCLUDED.source_type,
-         active = EXCLUDED.active,
-         valid_from = EXCLUDED.valid_from,
-         valid_to = EXCLUDED.valid_to,
-         notes = EXCLUDED.notes`,
-      [
-        profile.state_code.toUpperCase(),
-        profile.icms_factor,
-        profile.difal_factor,
-        profile.total_factor,
-        profile.source_type,
-        profile.active,
-        profile.valid_from || null,
-        profile.valid_to || null,
-        profile.notes || null
-      ]
-    );
-  },
-
-  // --- ORDER TAX SUMMARIES ---
-  async saveOrderTaxSummary(summary: OrderTaxSummary): Promise<void> {
-    await pool.query(
-      `INSERT INTO order_tax_summary (order_id, shipping_state, tax_factor_applied, icms_estimated, difal_estimated, tax_cost_total, calculation_mode, rule_version, calculated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (order_id) DO UPDATE SET
-         shipping_state = EXCLUDED.shipping_state,
-         tax_factor_applied = EXCLUDED.tax_factor_applied,
-         icms_estimated = EXCLUDED.icms_estimated,
-         difal_estimated = EXCLUDED.difal_estimated,
-         tax_cost_total = EXCLUDED.tax_cost_total,
-         calculation_mode = EXCLUDED.calculation_mode,
-         rule_version = EXCLUDED.rule_version,
-         calculated_at = CURRENT_TIMESTAMP`,
-      [
-        summary.order_id,
-        summary.shipping_state,
-        summary.tax_factor_applied,
-        summary.icms_estimated,
-        summary.difal_estimated,
-        summary.tax_cost_total,
-        summary.calculation_mode,
-        summary.rule_version,
-        summary.calculated_at
-      ]
-    );
-  },
-
-  async getOrderTaxSummaries(): Promise<OrderTaxSummary[]> {
-    const res = await pool.query("SELECT * FROM order_tax_summary");
-    return res.rows.map(row => ({
-      order_id: row.order_id,
-      shipping_state: row.shipping_state,
-      tax_factor_applied: Number(row.tax_factor_applied),
-      icms_estimated: Number(row.icms_estimated),
-      difal_estimated: Number(row.difal_estimated),
-      tax_cost_total: Number(row.tax_cost_total),
-      calculation_mode: row.calculation_mode,
-      rule_version: row.rule_version,
-      calculated_at: row.calculated_at
-    }));
-  },
-
-  async getOrderTaxSummaryById(orderId: string): Promise<OrderTaxSummary | null> {
-    const res = await pool.query("SELECT * FROM order_tax_summary WHERE order_id = $1", [orderId]);
-    if (res.rows.length === 0) return null;
-    const row = res.rows[0];
-    return {
-      order_id: row.order_id,
-      shipping_state: row.shipping_state,
-      tax_factor_applied: Number(row.tax_factor_applied),
-      icms_estimated: Number(row.icms_estimated),
-      difal_estimated: Number(row.difal_estimated),
-      tax_cost_total: Number(row.tax_cost_total),
-      calculation_mode: row.calculation_mode,
-      rule_version: row.rule_version,
-      calculated_at: row.calculated_at
-    };
-  }
-};

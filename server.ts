@@ -3,7 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { initPostgres, dbOps, pool } from "./src/db_postgres";
-import { User, MercadoLivreAccount, Order, OrderItem, ProductCost, CostImportBatch, OrderFinancialSummary, CalculatedOrder, StateTaxProfile } from "./src/types";
+import { User, MercadoLivreAccount, Order, OrderItem, ProductCost, CostImportBatch, OrderFinancialSummary, CalculatedOrder, StateTaxProfile } from "./src/shared/types";
 
 // Initialize Gemini client (calls from server only)
 const geminiApiKey = process.env.GEMINI_API_KEY;
@@ -1500,7 +1500,16 @@ async function startServer() {
             }
             
             revenueNet += orderNet;
-            totalCost += o.financial_summary.total_cost;
+            
+            // Sum up ALL costs: Product costs + taxes (icms + difal) + fees (marketplace_fee + shipping_cost_detail)
+            const productCost = o.financial_summary.total_cost || 0;
+            const tax = o.financial_summary.tax_cost || 0;
+            const difal = o.financial_summary.difal_cost || 0;
+            const mkt_fee = o.marketplace_fee_amount || 0;
+            const ship_detail = o.shipping_cost_detail || 0;
+            
+            totalCost += (productCost + tax + difal + mkt_fee + ship_detail);
+            profit += (o.financial_summary.gross_profit || 0);
           }
         }
         if (o.cost_pending) {
@@ -1508,7 +1517,6 @@ async function startServer() {
         }
       });
 
-      profit = isNaN(revenueNet - totalCost) ? 0 : (revenueNet - totalCost);
       const averageMargin = revenueNet > 0 ? (profit / revenueNet) : 0;
 
       res.json({
@@ -2062,7 +2070,16 @@ async function startServer() {
             }
 
             revenueNet += orderNetResult;
-            totalCost += o.financial_summary.total_cost;
+            
+            // Sum up ALL costs: Product costs + taxes + fees
+            const productCost = o.financial_summary.total_cost || 0;
+            const tax = o.financial_summary.tax_cost || 0;
+            const difal = o.financial_summary.difal_cost || 0;
+            const mkt_fee = o.marketplace_fee_amount || 0;
+            const ship_detail = o.shipping_cost_detail || 0;
+
+            totalCost += (productCost + tax + difal + mkt_fee + ship_detail);
+            profit += (o.financial_summary.gross_profit || 0);
           }
         }
         if (o.cost_pending) {
@@ -2070,7 +2087,6 @@ async function startServer() {
         }
       });
 
-      profit = isNaN(revenueNet - totalCost) ? 0 : (revenueNet - totalCost);
       const averageMargin = revenueNet > 0 ? (profit / revenueNet) : 0;
 
       // Group chart points by date
@@ -2095,14 +2111,21 @@ async function startServer() {
             }
           }
 
+          const productCost = o.financial_summary.total_cost || 0;
+          const tax = o.financial_summary.tax_cost || 0;
+          const difal = o.financial_summary.difal_cost || 0;
+          const mkt_fee = o.marketplace_fee_amount || 0;
+          const ship_detail = o.shipping_cost_detail || 0;
+          const unifiedCost = productCost + tax + difal + mkt_fee + ship_detail;
+
           existing.net += netContrib;
-          existing.cost += o.financial_summary.total_cost;
-          existing.profit += (netContrib - o.financial_summary.total_cost);
+          existing.cost += unifiedCost;
+          existing.profit += (o.financial_summary.gross_profit || 0);
         }
         dateMap.set(dateStr, existing);
       });
 
-      const chartData = Array.from(dateMap.values()).reverse().slice(-14).map(item => ({
+      const chartData = Array.from(dateMap.values()).slice(-14).map(item => ({
         ...item,
         gross: Number(Number(item.gross).toFixed(2)),
         net: Number(Number(item.net).toFixed(2)),
@@ -2166,7 +2189,15 @@ async function startServer() {
           if (orderSummary) {
             const itemWeight = order.total_amount > 0 ? (item.total_price / order.total_amount) : 0;
             const assignedNet = itemWeight * orderSummary.revenue_net;
-            const assignedCost = (item.cost_total || 0);
+            
+            // Allocate proportional all-inclusive costs (SKU cost + taxes + fees + shipping)
+            const itemProductCost = item.cost_total || 0;
+            const itemTax = (orderSummary.tax_cost || 0) * itemWeight;
+            const itemDifal = (orderSummary.difal_cost || 0) * itemWeight;
+            const itemMktFee = (order.marketplace_fee_amount || 0) * itemWeight;
+            const itemShipDetail = (order.shipping_cost_detail || 0) * itemWeight;
+
+            const assignedCost = itemProductCost + itemTax + itemDifal + itemMktFee + itemShipDetail;
 
             existing.revenue_liquida += assignedNet;
             existing.total_cost += assignedCost;
@@ -2177,13 +2208,30 @@ async function startServer() {
         });
       });
 
-      const topList = Array.from(productMap.values());
+      const topList = Array.from(productMap.values()).map(prod => {
+        const unitPrice = prod.qty_sold > 0 ? (prod.revenue_bruta / prod.qty_sold) : 0;
+        const margin = prod.revenue_bruta > 0 ? (prod.profit / prod.revenue_bruta) : 0;
+        return {
+          ...prod,
+          unit_price: Number(unitPrice.toFixed(2)),
+          margin: Number(margin.toFixed(4))
+        };
+      });
+
       const topByProfit = [...topList].sort((a,b) => b.profit - a.profit).slice(0, 5);
       const topByRevenue = [...topList].sort((a,b) => b.revenue_bruta - a.revenue_bruta).slice(0, 5);
+      const topByQtySold = [...topList].sort((a, b) => b.qty_sold - a.qty_sold).slice(0, 5);
+      const topByMargin = [...topList].sort((a, b) => b.margin - a.margin).slice(0, 5);
+      const topByExpensive = [...topList].sort((a, b) => b.unit_price - a.unit_price).slice(0, 5);
+      const topLessLucrative = [...topList].sort((a, b) => a.profit - b.profit).slice(0, 5);
 
       res.json({
         by_profit: topByProfit,
-        by_revenue: topByRevenue
+        by_revenue: topByRevenue,
+        by_qty_sold: topByQtySold,
+        by_margin: topByMargin,
+        by_expensive: topByExpensive,
+        by_less_lucrative: topLessLucrative
       });
     } catch (err: any) {
       res.status(500).json({ error: "Erro de produtos principais: " + err.message });

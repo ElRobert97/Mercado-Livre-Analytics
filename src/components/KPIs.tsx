@@ -21,25 +21,16 @@ export default function KPIs({ metrics }: KPIsProps) {
       id: "gross",
       title: "Faturamento Bruto",
       value: formatCurrency(metrics.revenue_gross),
-      desc: "Soma direta dos anúncios",
+      desc: "Soma direta do preço dos anúncios",
       icon: Coins,
       color: "bg-blue-500/10 border-blue-500/20 text-[#3483FA]",
       accent: "text-[#3483FA] font-black glow-blue",
     },
     {
-      id: "net",
-      title: "Receita Líquida",
-      value: formatCurrency(metrics.revenue_net),
-      desc: "Faturamento líquido deduzido",
-      icon: HandCoins,
-      color: "bg-emerald-500/10 border-emerald-500/20 text-[#00FF66]",
-      accent: "text-[#00FF66] font-black glow-green",
-    },
-    {
       id: "cost",
       title: "Custo Total dos Pedidos",
       value: formatCurrency(metrics.total_cost),
-      desc: "Soma de todos custos SKU dos pedidos",
+      desc: "Custo de aquisição (fornecedor) do estoque vendido",
       icon: ShoppingBag,
       color: "bg-purple-500/10 border-purple-500/20 text-purple-400",
       accent: "text-purple-300 font-black glow-purple",
@@ -48,7 +39,7 @@ export default function KPIs({ metrics }: KPIsProps) {
       id: "profit",
       title: "Lucro Real",
       value: formatCurrency(metrics.profit),
-      desc: "Receita Líquida - Custo Total",
+      desc: "Líquido final após taxas ML, frete e impostos",
       icon: ArrowUpRight,
       color: metrics.profit >= 0 ? "bg-yellow-500/10 border-yellow-500/20 text-[#FFE600]" : "bg-red-500/10 border-red-500/20 text-red-400",
       accent: metrics.profit >= 0 ? "text-[#FFE600] font-black glow-yellow" : "text-red-400 font-black",
@@ -57,7 +48,7 @@ export default function KPIs({ metrics }: KPIsProps) {
       id: "margin",
       title: "Margem de Lucro",
       value: `${(metrics.average_margin * 100).toFixed(1)}%`,
-      desc: "Lucro Real / Receita Líquida",
+      desc: "Rentabilidade percentual real sobre repasse",
       icon: CirclePercent,
       color: metrics.average_margin >= 0.20 ? "bg-emerald-500/10 border-emerald-500/20 text-[#00FF66]" : "bg-yellow-500/10 border-yellow-500/20 text-[#FFE600]",
       accent: "text-white font-black",
@@ -65,7 +56,7 @@ export default function KPIs({ metrics }: KPIsProps) {
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
       {kpis.map((kpi) => {
         const Icon = kpi.icon;
         return (
