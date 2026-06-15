@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState } from "react";
 import KPIs from "./KPIs";
 import { getDashboardOverview, getTopProducts, getAiAdvisorReport } from "../services/api";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from "recharts";
@@ -13,10 +13,6 @@ export default function DashboardView({ onNavigateToCosts }: DashboardViewProps)
   const [error, setError] = useState<string | null>(null);
   const [overview, setOverview] = useState<any>(null);
   const [topProducts, setTopProducts] = useState<any>(null);
-
-  // Refs for hidden date inputs to open native calendar
-  const fromPickerRef = useRef<HTMLInputElement>(null);
-  const toPickerRef = useRef<HTMLInputElement>(null);
 
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(isNaN(val) ? 0 : val);
@@ -187,31 +183,16 @@ export default function DashboardView({ onNavigateToCosts }: DashboardViewProps)
               onChange={e => handleDateInputChange(e.target.value, setDateFrom)}
               className="bg-transparent text-xs font-bold text-white focus:outline-none w-24 placeholder-white/20 text-center font-mono"
             />
-            {/* Native hidden date picker for calendar click */}
-            <input
-              type="date"
-              ref={fromPickerRef}
-              value={getIsoForPicker(dateFrom)}
-              onChange={e => handleDatePickerChange(e.target.value, setDateFrom)}
-              className="absolute pointer-events-none opacity-0 w-0 h-0"
-              tabIndex={-1}
-            />
-            <button
-              type="button"
-              onClick={() => {
-                if (fromPickerRef.current) {
-                  if (typeof fromPickerRef.current.showPicker === "function") {
-                    fromPickerRef.current.showPicker();
-                  } else {
-                    fromPickerRef.current.click();
-                  }
-                }
-              }}
-              className="hover:bg-white/10 p-1 rounded-md transition-colors cursor-pointer text-white/50 hover:text-white"
-              title="Selecionar data"
-            >
+            {/* Native hidden date picker overlay for calendar click */}
+            <div className="relative hover:bg-white/10 p-1.5 rounded-md transition-colors cursor-pointer text-white/50 hover:text-white flex items-center justify-center" title="Selecionar data">
               <Calendar className="h-3.5 w-3.5 text-yellow-400" />
-            </button>
+              <input
+                type="date"
+                value={getIsoForPicker(dateFrom)}
+                onChange={e => handleDatePickerChange(e.target.value, setDateFrom)}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 [color-scheme:dark]"
+              />
+            </div>
           </div>
 
           <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-xl px-2.5 py-1.5 focus-within:border-yellow-400/50 transition-colors relative">
@@ -223,31 +204,16 @@ export default function DashboardView({ onNavigateToCosts }: DashboardViewProps)
               onChange={e => handleDateInputChange(e.target.value, setDateTo)}
               className="bg-transparent text-xs font-bold text-white focus:outline-none w-24 placeholder-white/20 text-center font-mono"
             />
-            {/* Native hidden date picker for calendar click */}
-            <input
-              type="date"
-              ref={toPickerRef}
-              value={getIsoForPicker(dateTo)}
-              onChange={e => handleDatePickerChange(e.target.value, setDateTo)}
-              className="absolute pointer-events-none opacity-0 w-0 h-0"
-              tabIndex={-1}
-            />
-            <button
-              type="button"
-              onClick={() => {
-                if (toPickerRef.current) {
-                  if (typeof toPickerRef.current.showPicker === "function") {
-                    toPickerRef.current.showPicker();
-                  } else {
-                    toPickerRef.current.click();
-                  }
-                }
-              }}
-              className="hover:bg-white/10 p-1 rounded-md transition-colors cursor-pointer text-white/50 hover:text-white"
-              title="Selecionar data"
-            >
+            {/* Native hidden date picker overlay for calendar click */}
+            <div className="relative hover:bg-white/10 p-1.5 rounded-md transition-colors cursor-pointer text-white/50 hover:text-white flex items-center justify-center" title="Selecionar data">
               <Calendar className="h-3.5 w-3.5 text-yellow-400" />
-            </button>
+              <input
+                type="date"
+                value={getIsoForPicker(dateTo)}
+                onChange={e => handleDatePickerChange(e.target.value, setDateTo)}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 [color-scheme:dark]"
+              />
+            </div>
           </div>
 
           <button

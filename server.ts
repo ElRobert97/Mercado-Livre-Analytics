@@ -1607,6 +1607,98 @@ async function startServer() {
     }
   });
 
+  // --- SKU MEDIANS FOR PRICE SIMULATOR ---
+  app.get("/api/simulator/skus", requireAuth, async (req, res) => {
+    try {
+      const userId = currentUserSession!;
+      
+      // 1. Get all skus & purchase costs defined in the costs table
+      const costsRes = await pool.query(
+        "SELECT id, sku, product_name, cost_unitary, currency FROM costs WHERE user_id = $1 ORDER BY sku ASC",
+        [userId]
+      );
+      
+      const skuCosts = costsRes.rows;
+      
+      // 2. Fetch all order items and their shipping/fees for this user in matching orders
+      const statsQuery = `
+        SELECT 
+          i.sku,
+          o.shipping_cost_detail,
+          o.shipping_amount,
+          o.marketplace_fee_amount,
+          o.total_amount,
+          i.total_price,
+          i.quantity
+        FROM orders o
+        JOIN items i ON i.order_id = o.id
+        WHERE o.user_id = $1
+          AND o.status <> 'cancelled'
+      `;
+      const statsRes = await pool.query(statsQuery, [userId]);
+      
+      // Group stats by SKU
+      const statsBySku = new Map<string, any[]>();
+      for (const r of statsRes.rows) {
+        if (!r.sku) continue;
+        const uppercaseSku = r.sku.toUpperCase();
+        const arr = statsBySku.get(uppercaseSku) || [];
+        arr.push(r);
+        statsBySku.set(uppercaseSku, arr);
+      }
+      
+      // Assemble response detailing median costs per SKU
+      const skusWithMedians = skuCosts.map(item => {
+        const uppercaseSku = item.sku.toUpperCase();
+        const rows = statsBySku.get(uppercaseSku) || [];
+        
+        const shippingVals: number[] = [];
+        const feeVals: number[] = [];
+        let totalSalesCount = 0;
+        
+        for (const r of rows) {
+          const shipDetailNum = r.shipping_cost_detail !== null && r.shipping_cost_detail !== undefined ? parseFloat(r.shipping_cost_detail) : null;
+          const shipAmountNum = r.shipping_amount !== null && r.shipping_amount !== undefined ? parseFloat(r.shipping_amount) : 0;
+          const finalShipVal = (shipDetailNum !== null && shipDetailNum > 0) ? shipDetailNum : shipAmountNum;
+          
+          if (finalShipVal > 0) {
+            shippingVals.push(finalShipVal);
+          }
+          
+          const mtkFee = parseFloat(r.marketplace_fee_amount || "0");
+          const totPrice = parseFloat(r.total_price || "0");
+          const totAmt = parseFloat(r.total_amount || "1");
+          const qty = parseInt(r.quantity || "1");
+          
+          const proportionalFee = (mtkFee * (totPrice / (totAmt || 1))) / (qty || 1);
+          if (proportionalFee > 0) {
+            feeVals.push(proportionalFee);
+          }
+          
+          totalSalesCount += qty;
+        }
+        
+        const medianShipping = calculateMedian(shippingVals);
+        const medianFee = calculateMedian(feeVals);
+        
+        return {
+          sku: item.sku,
+          product_name: item.product_name,
+          purchase_cost: Number(item.cost_unitary),
+          currency: item.currency || "BRL",
+          median_shipping: medianShipping || 0,
+          median_fee: medianFee || 0,
+          historical_sales_count: totalSalesCount
+        };
+      });
+      
+      res.json(skusWithMedians);
+    } catch (err: any) {
+      console.error("[SKU MEDIANS ERROR]", err);
+      res.status(500).json({ error: "Erro ao carregar medianas de SKUs: " + err.message });
+    }
+  });
+
   // --- STATE TAX PROFILES API ---
   app.get("/api/tax-profiles", requireAuth, async (req, res) => {
     try {

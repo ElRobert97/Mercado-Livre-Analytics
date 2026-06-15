@@ -7,6 +7,7 @@ import CostsView from "./components/CostsView";
 import IntegrationsView from "./components/IntegrationsView";
 import AuthView from "./components/AuthView";
 import ProductsView from "./components/ProductsView";
+import PriceSimulatorView from "./components/PriceSimulatorView";
 import { checkAuth, getMLAccounts, syncMLOrders, logout } from "./services/api";
 import { MercadoLivreAccount } from "./types";
 import { Info, HelpCircle } from "lucide-react";
@@ -126,6 +127,8 @@ export default function App() {
         return <CostsView />;
       case "products":
         return <ProductsView />;
+      case "simulator":
+        return <PriceSimulatorView />;
       case "integrations":
         return <IntegrationsView accounts={accounts} onRefreshList={loadAccounts} />;
       default:
