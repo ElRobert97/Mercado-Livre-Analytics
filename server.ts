@@ -1,9 +1,26 @@
 import express from "express";
 import path from "path";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { initPostgres, dbOps, pool } from "./src/db_postgres";
 import { User, MercadoLivreAccount, Order, OrderItem, ProductCost, CostImportBatch, OrderFinancialSummary, CalculatedOrder, StateTaxProfile } from "./src/shared/types";
+
+// Dynamic background synchronizing queue structures
+interface SyncJob {
+  id: string;
+  userId: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  progress: number;
+  message: string;
+  countSynced?: number;
+  error?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+const syncJobsQueue = new Map<string, SyncJob>();
+let isProcessingQueue = false;
 
 // Initialize Gemini client (calls from server only)
 const geminiApiKey = process.env.GEMINI_API_KEY;
@@ -32,11 +49,40 @@ async function startServer() {
     console.error("CRITICAL: Failed to link with Neon Postgres database:", err);
   }
 
-  // Helper for authentication (in-memory simple session mapping to postgres primary key)
-  let currentUserSession: string | null = "user_robert"; // logged in as seed user by default
+  // Pure Node pbkdf2 password hashing & verification
+  function hashPassword(password: string): string {
+    const salt = crypto.randomBytes(16).toString("hex");
+    const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
+    return `${salt}:${hash}`;
+  }
+
+  function verifyPassword(password: string, storedHash: string): boolean {
+    if (!storedHash) return false;
+    if (!storedHash.includes(":")) {
+      // Legacy plaintext password support
+      return password === storedHash;
+    }
+    const [salt, hash] = storedHash.split(":");
+    const testHash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
+    return hash === testHash;
+  }
+
+  // Helper for authentication (extracted dynamically per request for multi-user safety)
+  function getUserIdFromRequest(req: express.Request): string {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      return authHeader.substring(7);
+    }
+    return "user_robert"; // fallback default seed user
+  }
 
   function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
-    if (!currentUserSession) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Não autorizado. Por favor, faça login." });
+    }
+    const token = authHeader.substring(7);
+    if (!token) {
       return res.status(401).json({ error: "Não autorizado. Por favor, faça login." });
     }
     next();
@@ -143,7 +189,8 @@ async function startServer() {
 
   // Helper to refresh a Mercado Livre account's token
   async function refreshAccountTokenIfNeeded(accId: string, force: boolean = false): Promise<string> {
-    const acc = await dbOps.getAccountById(accId, currentUserSession || "user_robert");
+    const res = await pool.query("SELECT * FROM accounts WHERE id = $1", [accId]);
+    const acc = res.rows[0];
     if (!acc) {
       throw new Error(`Conta não encontrada: ${accId}`);
     }
@@ -700,13 +747,12 @@ async function startServer() {
         id: `user_${Date.now()}`,
         name,
         email,
-        password_hash: password, // plaintext for simplified demo
+        password_hash: hashPassword(password),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
 
       await dbOps.createUser(newUser);
-      currentUserSession = newUser.id;
       res.status(201).json({ user: { id: newUser.id, name: newUser.name, email: newUser.email } });
     } catch (err: any) {
       console.error(err);
@@ -722,11 +768,10 @@ async function startServer() {
 
     try {
       const user = await dbOps.findUserByEmail(email);
-      if (!user || user.password_hash !== password) {
+      if (!user || !verifyPassword(password, user.password_hash)) {
         return res.status(400).json({ error: "Email ou senha incorretos." });
       }
 
-      currentUserSession = user.id;
       res.json({ user: { id: user.id, name: user.name, email: user.email } });
     } catch (err: any) {
       console.error(err);
@@ -735,23 +780,25 @@ async function startServer() {
   });
 
   app.post("/api/auth/logout", (req, res) => {
-    currentUserSession = null;
     res.json({ message: "Sessão encerrada com sucesso." });
   });
 
   app.get("/api/auth/me", async (req, res) => {
-    if (!currentUserSession) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.json({ user: null });
+    }
+    const userId = authHeader.substring(7);
+    if (!userId) {
       return res.json({ user: null });
     }
     try {
-      const user = await dbOps.findUserById(currentUserSession);
+      const user = await dbOps.findUserById(userId);
       if (!user) {
-        currentUserSession = null;
         return res.json({ user: null });
       }
       res.json({ user: { id: user.id, name: user.name, email: user.email } });
     } catch (err) {
-      currentUserSession = null;
       res.json({ user: null });
     }
   });
@@ -760,7 +807,8 @@ async function startServer() {
 
   app.get("/api/integrations/mercadolivre/accounts", requireAuth, async (req, res) => {
     try {
-      const accounts = await dbOps.getUserMLAccounts(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      const accounts = await dbOps.getUserMLAccounts(userId);
       res.json(accounts);
     } catch (err: any) {
       res.status(500).json({ error: "Erro ao buscar integrações: " + err.message });
@@ -773,7 +821,8 @@ async function startServer() {
     const clientId = process.env.ML_CLIENT_ID || process.env.MERCADOLIVRE_CLIENT_ID || "5594702884845296";
     const appUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
     const redirectUri = process.env.ML_REDIRECT_URI || `${appUrl}/api/integrations/mercadolivre/callback`;
-    const state = String(query.state || currentUserSession || "state_rand");
+    const userId = getUserIdFromRequest(req);
+    const state = String(query.state || userId || "state_rand");
 
     res.json({
       auth_url: `https://auth.mercadolivre.com.br/authorization?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`,
@@ -903,7 +952,8 @@ async function startServer() {
     if (!account_id) return res.status(400).json({ error: "ID de conta obrigatório" });
 
     try {
-      const acc = await dbOps.getAccountById(account_id, currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      const acc = await dbOps.getAccountById(account_id, userId);
       if (!acc) return res.status(404).json({ error: "Integração não encontrada" });
 
       // If simulated, refresh mock credentials
@@ -915,7 +965,7 @@ async function startServer() {
           `REFRESHED_REFRESH_TOKEN_${Date.now()}`,
           nextExpiry
         );
-        const updated = await dbOps.getAccountById(account_id, currentUserSession!);
+        const updated = await dbOps.getAccountById(account_id, userId);
         return res.json({ message: "Token de simulação atualizado com sucesso", account: updated });
       }
 
@@ -947,7 +997,7 @@ async function startServer() {
 
       await dbOps.updateMLAccountTokens(acc.id, freshTokenData.access_token, freshTokenData.refresh_token, expiresAt);
       
-      const updated = await dbOps.getAccountById(account_id, currentUserSession!);
+      const updated = await dbOps.getAccountById(account_id, userId);
       res.json({ message: "Token real Mercado Livre atualizado com sucesso", account: updated });
     } catch (err: any) {
       console.error(err);
@@ -958,7 +1008,8 @@ async function startServer() {
   app.delete("/api/integrations/mercadolivre/accounts/:id", requireAuth, async (req, res) => {
     const accId = req.params.id;
     try {
-      await dbOps.deleteMLAccount(accId, currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      await dbOps.deleteMLAccount(accId, userId);
       res.json({ message: "Integração removida com sucesso de sua conta Postgres." });
     } catch (err: any) {
       res.status(500).json({ error: "Erro ao remover integração: " + err.message });
@@ -998,9 +1049,10 @@ async function startServer() {
   app.get("/api/products", requireAuth, async (req, res) => {
     try {
       const { accountId, search, status, limit = "40", offset = "0" } = req.query;
+      const userId = getUserIdFromRequest(req);
 
       // 1. Get user accounts
-      let accounts = await dbOps.getUserMLAccounts(currentUserSession!);
+      let accounts = await dbOps.getUserMLAccounts(userId);
 
       // Filter by accountId if specified
       if (accountId) {
@@ -1219,7 +1271,7 @@ async function startServer() {
               AND i.sku = ANY($2)
               AND o.order_date >= NOW() - INTERVAL '3 months'
           `;
-          const statsRes = await pool.query(statsQuery, [currentUserSession!, allSkusOnPage]);
+          const statsRes = await pool.query(statsQuery, [userId, allSkusOnPage]);
           
           // Group rows by SKU
           const groupedBySku = new Map<string, any[]>();
@@ -1305,8 +1357,10 @@ async function startServer() {
         return res.status(400).json({ error: "O identificador da conta integrada (accountId) é obrigatório." });
       }
 
+      const userId = getUserIdFromRequest(req);
+
       // Fetch the account to get tokens
-      const acc = await dbOps.getAccountById(accountId, currentUserSession!);
+      const acc = await dbOps.getAccountById(accountId, userId);
       if (!acc) {
         return res.status(404).json({ error: "Conta integrada não encontrada ou sem privilégio de acesso." });
       }
@@ -1410,7 +1464,8 @@ async function startServer() {
 
   app.get("/api/orders", requireAuth, async (req, res) => {
     try {
-      let calculated = await getCalculatedOrdersPostgres(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      let calculated = await getCalculatedOrdersPostgres(userId);
 
       // Apply queries filtering
       const { status, sku, search, dateFrom, dateTo, accountId } = req.query;
@@ -1471,7 +1526,8 @@ async function startServer() {
 
   app.get("/api/orders/summary", requireAuth, async (req, res) => {
     try {
-      const calculated = await getCalculatedOrdersPostgres(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      const calculated = await getCalculatedOrdersPostgres(userId);
 
       let revenueGross = 0;
       let revenueNet = 0;
@@ -1610,7 +1666,7 @@ async function startServer() {
   // --- SKU MEDIANS FOR PRICE SIMULATOR ---
   app.get("/api/simulator/skus", requireAuth, async (req, res) => {
     try {
-      const userId = currentUserSession!;
+      const userId = getUserIdFromRequest(req);
       
       // 1. Get all skus & purchase costs defined in the costs table
       const costsRes = await pool.query(
@@ -1746,7 +1802,8 @@ async function startServer() {
 
   app.post("/api/orders/recalculate", requireAuth, async (req, res) => {
     try {
-      await recalculate_order_profit(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      await recalculate_order_profit(userId);
       res.json({ message: "Reprocessamento concluído! Todos os custos de pedidos e lucros estatais foram recalculados." });
     } catch (err: any) {
       res.status(500).json({ error: "Erro ao reprocessar os lucros dos pedidos: " + err.message });
@@ -1756,7 +1813,8 @@ async function startServer() {
   app.get("/api/orders/:id", requireAuth, async (req, res) => {
     const orderId = req.params.id;
     try {
-      const calculated = await getCalculatedOrdersPostgres(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      const calculated = await getCalculatedOrdersPostgres(userId);
       const order = calculated.find(o => o.id === orderId);
 
       if (!order) {
@@ -1764,7 +1822,7 @@ async function startServer() {
       }
 
       // Check ownership
-      const dbOrder = await dbOps.getOrderById(orderId, currentUserSession!);
+      const dbOrder = await dbOps.getOrderById(orderId, userId);
       if (!dbOrder) {
         return res.status(403).json({ error: "Calma! Você não tem autorização para ler este pedido." });
       }
@@ -1775,10 +1833,26 @@ async function startServer() {
     }
   });
 
-  // Sync endpoint: syncs either realorders from Mercado Livre API if account is real, or mock orders
+  // --- SYNC STATUS ROUTE ---
+  app.get("/api/orders/sync/status/:id", requireAuth, (req, res) => {
+    const jobId = req.params.id;
+    const job = syncJobsQueue.get(jobId);
+    if (!job) {
+      return res.status(404).json({ error: "Tarefa de sincronização não localizada." });
+    }
+    const userId = getUserIdFromRequest(req);
+    // Security check: make sure the user can only access their own jobs
+    if (job.userId !== userId) {
+      return res.status(403).json({ error: "Acesso não autorizado a esta tarefa!" });
+    }
+    res.json(job);
+  });
+
+  // Sync endpoint: syncs real orders from Mercado Livre API if account is real using an asynchronous queue
   app.post("/api/orders/sync", requireAuth, async (req, res) => {
     try {
-      const userAccounts = await dbOps.getUserMLAccounts(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      const userAccounts = await dbOps.getUserMLAccounts(userId);
       if (userAccounts.length === 0) {
         return res.status(400).json({ error: "Sincronização impossível. Conecte pelo menos uma conta Mercado Livre primeiro!" });
       }
@@ -1786,168 +1860,255 @@ async function startServer() {
       const dateFrom = req.query.dateFrom || req.body?.dateFrom;
       const dateTo = req.query.dateTo || req.body?.dateTo;
 
-      // Check if any real accounts are registered. If yes, query Mercado Livre API.
-      // If not, proceed to simulation seed synced orders in standard postgres database.
-      const realAccounts = userAccounts.filter(acc => !acc.access_token.startsWith("SIM_") && !acc.access_token.startsWith("MOCK_"));
-      let syncedCount = 0;
-
-      if (realAccounts.length > 0) {
-        // REAL SYNC FROM MERCADO LIVRE API
-        for (const acc of realAccounts) {
-          try {
-            // Pre-fetch a guaranteed valid/refreshed access token
-            let activeToken = acc.access_token;
-            try {
-              activeToken = await refreshAccountTokenIfNeeded(acc.id);
-            } catch (authErr: any) {
-              console.warn(`[SYNC WARNING] Failed pre-sync token refresh for account ${acc.id}, using existing token:`, authErr.message);
-            }
-
-            // Fetch real orders mapping to this connected account using date range filters
-            let mlSearchUrl = `https://api.mercadolibre.com/orders/search?seller=${acc.ml_user_id}`;
-
-            if (dateFrom && dateTo) {
-              const formattedFrom = `${dateFrom}T00:01:00.000-00:00`;
-              const formattedTo = `${dateTo}T23:59:00.000-00:00`;
-              mlSearchUrl += `&order.date_created.from=${encodeURIComponent(formattedFrom)}&order.date_created.to=${encodeURIComponent(formattedTo)}`;
-            } else {
-              // Default to last 60 days
-              const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString().split('T')[0];
-              const todayStr = new Date().toISOString().split('T')[0];
-              const formattedFrom = `${sixtyDaysAgo}T00:01:00.000-00:00`;
-              const formattedTo = `${todayStr}T23:59:00.000-00:00`;
-              mlSearchUrl += `&order.date_created.from=${encodeURIComponent(formattedFrom)}&order.date_created.to=${encodeURIComponent(formattedTo)}`;
-            }
-
-            let offset = 0;
-            while (true) {
-              const paginatedUrl = `${mlSearchUrl}&offset=${offset}`;
-              let mlResponse = await fetch(paginatedUrl, {
-                headers: { "Authorization": `Bearer ${activeToken}` }
-              });
-
-              if (!mlResponse.ok && mlResponse.status === 401) {
-                console.log(`[SYNC] Got 401 for account ${acc.id}. Attempting forced token refresh.`);
-                try {
-                  activeToken = await refreshAccountTokenIfNeeded(acc.id, true);
-                  // Retry fetch with new token
-                  mlResponse = await fetch(paginatedUrl, {
-                    headers: { "Authorization": `Bearer ${activeToken}` }
-                  });
-                } catch (refreshErr: any) {
-                  console.error(`[SYNC ERROR] Forced token refresh failed for account ${acc.id}:`, refreshErr.message);
-                }
-              }
-
-              if (!mlResponse.ok) {
-                const errorStr = await mlResponse.text();
-                console.error(`Error querying Mercado Livre at offset ${offset}:`, errorStr);
-                break;
-              }
-
-              const resJson = await mlResponse.json();
-              const mlOrders = resJson.results || [];
-              if (mlOrders.length === 0) {
-                break;
-              }
-              
-              for (const mlOrd of mlOrders) {
-                const mlId = String(mlOrd.id);
-                const orderIdStr = `ord_ml_${mlId}`;
-
-                // Map order and fields
-                const totalAmount = Number(mlOrd.total_amount || 0);
-                let shippingPrice = Number(mlOrd.shipping?.cost || 0);
-                 let shipCity: string | undefined = undefined;
-                 let shipMunicipality: string | undefined = undefined;
-                 let shipState: string | undefined = undefined;
-                 let shipCostDetail: number | undefined = undefined;
-                 let mlShipmentId: string | undefined = undefined;
-                if (mlOrd.shipping && mlOrd.shipping.id) {
-                  const sData = await getShipmentExtendedData(mlOrd.shipping.id, activeToken);
-                  shippingPrice = sData.shipping_amount;
-                  shipCity = sData.shipping_city;
-                  shipMunicipality = sData.shipping_municipality;
-                  shipState = sData.shipping_state;
-                  shipCostDetail = sData.shipping_cost_detail;
-                  mlShipmentId = sData.ml_shipment_id;
-                }
-                const discount = Number(mlOrd.coupon?.amount || 0);
-                const saleFee = Number(mlOrd.order_items?.reduce((ttl: number, curr: any) => ttl + Number(curr.sale_fee || 0), 0) || 0);
-
-                const realOrder: Order = {
-                  id: orderIdStr,
-                  user_id: currentUserSession!,
-                  ml_account_id: acc.id,
-                  ml_order_id: mlId,
-                  status: mlOrd.status === "paid" ? "paid" : "confirmed",
-                  order_date: mlOrd.date_created || new Date().toISOString(),
-                  total_amount: totalAmount,
-                  shipping_amount: shippingPrice,
-                  discount_amount: discount,
-                  marketplace_fee_amount: saleFee,
-                  net_amount: (totalAmount + shippingPrice) - (discount + saleFee),
-                  pack_id: mlOrd.pack_id ? String(mlOrd.pack_id) : undefined,
-                  shipping_city: shipCity,
-                  shipping_municipality: shipMunicipality,
-                  shipping_state: shipState,
-                  shipping_cost_detail: shipCostDetail,
-                  ml_shipment_id: mlShipmentId,
-                  created_at: new Date().toISOString(),
-                  updated_at: new Date().toISOString()
-                };
-
-                const dbItems: OrderItem[] = (mlOrd.order_items || []).map((itRow: any, idx: number) => {
-                  return {
-                    id: `item_ml_${mlId}_${idx}`,
-                    order_id: orderIdStr,
-                    sku: extractMlSku(itRow, idx),
-                    product_name: String(itRow.item?.title || "Produto Importado ML"),
-                    quantity: Number(itRow.quantity || 1),
-                    unit_price: Number(itRow.unit_price || 0),
-                    total_price: Number(itRow.unit_price || 0) * Number(itRow.quantity || 1),
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString()
-                  };
-                });
-
-                await dbOps.saveOrderWithItems(realOrder, dbItems);
-                syncedCount++;
-              }
-
-              const paging = resJson.paging || {};
-              const total = Number(paging.total || 0);
-              const limit = Number(paging.limit || 50);
-
-              offset += limit;
-              if (offset >= total) {
-                break;
-              }
-            }
-          } catch (apiErr) {
-            console.error(`Error querying Mercado Livre for account ${acc.nickname}:`, apiErr);
-          }
-        }
-
-        return res.json({
-          message: `Sincronização com as credenciais reais concluída! Apuramos ${syncedCount} vendas mapeadas faturadas do Mercado Livre em ambiente de produção.`,
-          countSynced: syncedCount
+      // Check for any currently active jobs for this user to avoid overlapping database lock loads
+      const activeUserJobs = Array.from(syncJobsQueue.values()).filter(
+        j => j.userId === userId && (j.status === "pending" || j.status === "processing")
+      );
+      if (activeUserJobs.length > 0) {
+        return res.status(400).json({ 
+          error: "Já existe uma tarefa de sincronização ativa para sua conta na fila de processamento secundário de jobs." 
         });
       }
 
-      return res.status(400).json({
-        error: "Sincronização indisponível. Por favor, conecte uma conta de vendedor oficial via OAuth no menu Integrações para buscar dados reais do Mercado Livre."
+      // Create and enqueue a sync job
+      const jobId = `sync_job_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+      const newJob: SyncJob = {
+        id: jobId,
+        userId,
+        status: "pending",
+        progress: 0,
+        message: "Tarefa adicionada à fila de processamento secundário...",
+        dateFrom: dateFrom ? String(dateFrom) : undefined,
+        dateTo: dateTo ? String(dateTo) : undefined
+      };
+
+      syncJobsQueue.set(jobId, newJob);
+
+      // Trigger queue processing asynchronously without awaiting
+      triggerQueueProcessing();
+
+      res.status(202).json({
+        message: "Sincronização adicionada à fila com sucesso.",
+        jobId,
+        status: "pending"
       });
     } catch (err: any) {
-      res.status(500).json({ error: "Erro de sincronização: " + err.message });
+      res.status(500).json({ error: "Erro de fila: " + err.message });
     }
   });
+
+  function triggerQueueProcessing() {
+    if (isProcessingQueue) return;
+    isProcessingQueue = true;
+
+    (async () => {
+      try {
+        while (true) {
+          // Find next pending job
+          let nextJob: SyncJob | undefined;
+          for (const job of syncJobsQueue.values()) {
+            if (job.status === "pending") {
+              nextJob = job;
+              break;
+            }
+          }
+
+          if (!nextJob) {
+            break; // No more pending jobs
+          }
+
+          // Process the job
+          await executeSyncJob(nextJob);
+        }
+      } catch (queueErr) {
+        console.error("Queue processor encountered error:", queueErr);
+      } finally {
+        isProcessingQueue = false;
+      }
+    })();
+  }
+
+  async function executeSyncJob(job: SyncJob) {
+    job.status = "processing";
+    job.message = "Inicializando sincronização de vendas...";
+    job.progress = 5;
+
+    try {
+      const userAccounts = await dbOps.getUserMLAccounts(job.userId);
+      const realAccounts = userAccounts.filter(
+        acc => !acc.access_token.startsWith("SIM_") && !acc.access_token.startsWith("MOCK_")
+      );
+
+      if (realAccounts.length === 0) {
+        job.status = "failed";
+        job.progress = 100;
+        job.error = "Por favor, conecte uma conta Mercado Livre real via OAuth no menu Integrações para buscar dados atualizados da API.";
+        job.message = "Sincronização desabilitada em contas simulador. Conecte sua conta de produção.";
+        return;
+      }
+
+      job.progress = 15;
+      job.message = "Negociando credenciais reais do Mercado Livre...";
+      let syncedCount = 0;
+      let accIdx = 0;
+
+      for (const acc of realAccounts) {
+        accIdx++;
+        job.progress = 15 + Math.floor((accIdx / realAccounts.length) * 65);
+        job.message = `Sincronizando transações da loja: ${acc.nickname || acc.id}...`;
+
+        // Wait 1000ms pause to ensure we do not hit database lock or ML rate limits
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        let activeToken = acc.access_token;
+        try {
+          activeToken = await refreshAccountTokenIfNeeded(acc.id);
+        } catch (authErr: any) {
+          console.warn(`[SYNC PRE] Refresh failed:`, authErr.message);
+        }
+
+        let mlSearchUrl = `https://api.mercadolibre.com/orders/search?seller=${acc.ml_user_id}`;
+        const dateFrom = job.dateFrom;
+        const dateTo = job.dateTo;
+        if (dateFrom && dateTo) {
+          const formattedFrom = `${dateFrom}T00:01:00.000-00:00`;
+          const formattedTo = `${dateTo}T23:59:00.000-00:00`;
+          mlSearchUrl += `&order.date_created.from=${encodeURIComponent(formattedFrom)}&order.date_created.to=${encodeURIComponent(formattedTo)}`;
+        } else {
+          const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString().split('T')[0];
+          const todayStr = new Date().toISOString().split('T')[0];
+          const formattedFrom = `${sixtyDaysAgo}T00:01:00.000-00:00`;
+          const formattedTo = `${todayStr}T23:59:00.000-00:00`;
+          mlSearchUrl += `&order.date_created.from=${encodeURIComponent(formattedFrom)}&order.date_created.to=${encodeURIComponent(formattedTo)}`;
+        }
+
+        let offset = 0;
+        while (true) {
+          const paginatedUrl = `${mlSearchUrl}&offset=${offset}`;
+          let mlResponse = await fetch(paginatedUrl, {
+            headers: { "Authorization": `Bearer ${activeToken}` }
+          });
+
+          if (!mlResponse.ok && mlResponse.status === 401) {
+            try {
+              activeToken = await refreshAccountTokenIfNeeded(acc.id, true);
+              mlResponse = await fetch(paginatedUrl, {
+                headers: { "Authorization": `Bearer ${activeToken}` }
+              });
+            } catch (err) {
+              console.error(err);
+            }
+          }
+
+          if (!mlResponse.ok) {
+            break;
+          }
+
+          const resJson = await mlResponse.json();
+          const mlOrders = resJson.results || [];
+          if (mlOrders.length === 0) {
+            break;
+          }
+
+          for (const mlOrd of mlOrders) {
+            const mlId = String(mlOrd.id);
+            const orderIdStr = `ord_ml_${mlId}`;
+
+            const totalAmount = Number(mlOrd.total_amount || 0);
+            let shippingPrice = Number(mlOrd.shipping?.cost || 0);
+            let shipCity, shipMunicipality, shipState, shipCostDetail, mlShipmentId;
+
+            if (mlOrd.shipping && mlOrd.shipping.id) {
+              const sData = await getShipmentExtendedData(mlOrd.shipping.id, activeToken);
+              shippingPrice = sData.shipping_amount;
+              shipCity = sData.shipping_city;
+              shipMunicipality = sData.shipping_municipality;
+              shipState = sData.shipping_state;
+              shipCostDetail = sData.shipping_cost_detail;
+              mlShipmentId = sData.ml_shipment_id;
+            }
+
+            const discount = Number(mlOrd.coupon?.amount || 0);
+            const saleFee = Number(mlOrd.order_items?.reduce((ttl: number, curr: any) => ttl + Number(curr.sale_fee || 0), 0) || 0);
+
+            const realOrder: Order = {
+              id: orderIdStr,
+              user_id: job.userId,
+              ml_account_id: acc.id,
+              ml_order_id: mlId,
+              status: mlOrd.status === "paid" ? "paid" : "confirmed",
+              order_date: mlOrd.date_created || new Date().toISOString(),
+              total_amount: totalAmount,
+              shipping_amount: shippingPrice,
+              discount_amount: discount,
+              marketplace_fee_amount: saleFee,
+              net_amount: (totalAmount + shippingPrice) - (discount + saleFee),
+              pack_id: mlOrd.pack_id ? String(mlOrd.pack_id) : undefined,
+              shipping_city: shipCity,
+              shipping_municipality: shipMunicipality,
+              shipping_state: shipState,
+              shipping_cost_detail: shipCostDetail,
+              ml_shipment_id: mlShipmentId,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            };
+
+            const dbItems: OrderItem[] = (mlOrd.order_items || []).map((itRow: any, idx: number) => ({
+              id: `item_ml_${mlId}_${idx}`,
+              order_id: orderIdStr,
+              sku: extractMlSku(itRow, idx),
+              product_name: String(itRow.item?.title || "Produto Importado ML"),
+              quantity: Number(itRow.quantity || 1),
+              unit_price: Number(itRow.unit_price || 0),
+              total_price: Number(itRow.unit_price || 0) * Number(itRow.quantity || 1),
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            }));
+
+            await dbOps.saveOrderWithItems(realOrder, dbItems);
+            syncedCount++;
+
+            // Yield control briefly (50ms gap) to prevent CPU resource limits
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
+
+          const paging = resJson.paging || {};
+          const total = Number(paging.total || 0);
+          const limit = Number(paging.limit || 50);
+
+          offset += limit;
+          if (offset >= total) {
+            break;
+          }
+        }
+      }
+
+      // Recalculate order profit in database after syncing
+      try {
+        await recalculate_order_profit(job.userId);
+      } catch (recalcErr) {
+        console.warn("Recalculation warns:", recalcErr);
+      }
+
+      job.status = "completed";
+      job.progress = 100;
+      job.countSynced = syncedCount;
+      job.message = `Sincronização com Mercado Livre executada! Total de ${syncedCount} transações mapeadas da conta.`;
+    } catch (jobErr: any) {
+      console.error("Job sync exception:", jobErr);
+      job.status = "failed";
+      job.progress = 100;
+      job.error = jobErr.message;
+      job.message = "A tarefa falhou durante o processamento: " + jobErr.message;
+    }
+  }
 
   // ==================== 7.4. Product Costs Endpoints ====================
 
   app.get("/api/costs", requireAuth, async (req, res) => {
     try {
-      const userCosts = await dbOps.getUserCosts(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      const userCosts = await dbOps.getUserCosts(userId);
       res.json(userCosts);
     } catch (err: any) {
       res.status(500).json({ error: "Erro ao buscar custos: " + err.message });
@@ -1957,7 +2118,8 @@ async function startServer() {
   app.get("/api/costs/:sku", requireAuth, async (req, res) => {
     const sku = normalizeSku(req.params.sku).toUpperCase();
     try {
-      const cost = await dbOps.getCostBySku(currentUserSession!, sku);
+      const userId = getUserIdFromRequest(req);
+      const cost = await dbOps.getCostBySku(userId, sku);
       if (!cost) {
         return res.status(404).json({ error: "Custo por SKU não cadastrado." });
       }
@@ -1975,11 +2137,12 @@ async function startServer() {
 
     try {
       sku = normalizeSku(sku);
+      const userId = getUserIdFromRequest(req);
 
       const nowStr = new Date().toISOString();
       const newCost: ProductCost = {
         id: `cost_${Date.now()}`,
-        user_id: currentUserSession!,
+        user_id: userId,
         sku: sku.toUpperCase(),
         product_name: product_name || "Produto sem nome",
         cost_unitary: Number(cost_unitary),
@@ -2001,7 +2164,8 @@ async function startServer() {
   app.delete("/api/costs/:id", requireAuth, async (req, res) => {
     const id = req.params.id;
     try {
-      await dbOps.deleteProductCost(id, currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      await dbOps.deleteProductCost(id, userId);
       res.json({ message: "Custo por SKU excluído com sucesso do Postgres." });
     } catch (err: any) {
       res.status(500).json({ error: "Erro ao remover custo: " + err.message });
@@ -2036,6 +2200,7 @@ async function startServer() {
     }
 
     try {
+      const userId = getUserIdFromRequest(req);
       let inserted = 0;
       let updated = 0;
       let failed = 0;
@@ -2064,7 +2229,7 @@ async function startServer() {
         }
 
         // Look if cost exists in DB to increment counters
-        const existingCost = await dbOps.getCostBySku(currentUserSession!, sku);
+        const existingCost = await dbOps.getCostBySku(userId, sku);
         if (existingCost) {
           updated++;
         } else {
@@ -2073,7 +2238,7 @@ async function startServer() {
 
         const costToStore: ProductCost = {
           id: `cost_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-          user_id: currentUserSession!,
+          user_id: userId,
           sku: sku.toUpperCase(),
           product_name: pName || "Produto Importado",
           cost_unitary: costAmount,
@@ -2090,7 +2255,7 @@ async function startServer() {
       // Record batch history in DB
       const newBatch: CostImportBatch = {
         id: `batch_${Date.now()}`,
-        user_id: currentUserSession!,
+        user_id: userId,
         file_name: fileName || "upload_manual.csv",
         file_type: "csv",
         total_rows: inserted + updated + failed,
@@ -2114,7 +2279,8 @@ async function startServer() {
 
   app.get("/api/costs/history/batches", requireAuth, async (req, res) => {
     try {
-      const batches = await dbOps.getUserBatches(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      const batches = await dbOps.getUserBatches(userId);
       res.json(batches);
     } catch (err: any) {
       res.status(500).json({ error: "Erro de histórico de lotes: " + err.message });
@@ -2125,7 +2291,8 @@ async function startServer() {
 
   app.get("/api/dashboard/overview", requireAuth, async (req, res) => {
     try {
-      let calculated = await getCalculatedOrdersPostgres(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      let calculated = await getCalculatedOrdersPostgres(userId);
 
       const { dateFrom, dateTo } = req.query;
       if (dateFrom) {
@@ -2243,7 +2410,8 @@ async function startServer() {
 
   app.get("/api/dashboard/top-products", requireAuth, async (req, res) => {
     try {
-      let calculated = await getCalculatedOrdersPostgres(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      let calculated = await getCalculatedOrdersPostgres(userId);
 
       const { dateFrom, dateTo } = req.query;
       if (dateFrom) {
@@ -2332,7 +2500,8 @@ async function startServer() {
 
   app.get("/api/dashboard/orders-without-cost", requireAuth, async (req, res) => {
     try {
-      const calculated = await getCalculatedOrdersPostgres(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      const calculated = await getCalculatedOrdersPostgres(userId);
       const pendingOrders = calculated.filter(o => o.cost_pending);
       res.json(pendingOrders);
     } catch (err: any) {
@@ -2350,7 +2519,8 @@ async function startServer() {
     }
 
     try {
-      let calculated = await getCalculatedOrdersPostgres(currentUserSession!);
+      const userId = getUserIdFromRequest(req);
+      let calculated = await getCalculatedOrdersPostgres(userId);
 
       const { dateFrom, dateTo } = req.query;
       if (dateFrom) {
@@ -2362,7 +2532,7 @@ async function startServer() {
         calculated = calculated.filter(o => new Date(o.order_date) <= toDate);
       }
 
-      const dbAccounts = await dbOps.getUserMLAccounts(currentUserSession!);
+      const dbAccounts = await dbOps.getUserMLAccounts(userId);
 
       let revenueGross = 0;
       let revenueNet = 0;

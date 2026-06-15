@@ -9,6 +9,8 @@ interface HeaderProps {
   syncSuccessMessage: string | null;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
+  syncProgress?: number;
+  syncStatusMessage?: string | null;
 }
 
 export default function Header({ 
@@ -18,7 +20,9 @@ export default function Header({
   onSync, 
   syncSuccessMessage,
   sidebarOpen,
-  onToggleSidebar
+  onToggleSidebar,
+  syncProgress = 0,
+  syncStatusMessage
 }: HeaderProps) {
   const getPageTitle = () => {
     switch (currentTab) {
@@ -125,6 +129,23 @@ export default function Header({
         <div className="absolute right-8 top-22 bg-emerald-950/90 border border-emerald-500/30 text-emerald-200 rounded-xl py-2.5 px-4 text-xs font-bold shadow-2xl animate-fade-in flex items-center gap-2 z-50 backdrop-blur-xl">
           <CheckCircle className="h-4 w-4 text-emerald-400" />
           {syncSuccessMessage}
+        </div>
+      )}
+
+      {syncing && syncStatusMessage && (
+        <div className="absolute right-8 top-22 bg-slate-900/95 border border-yellow-500/30 text-white rounded-xl py-3.5 px-4 text-xs font-bold shadow-2xl animate-fade-in flex flex-col gap-2 w-80 z-50 backdrop-blur-xl">
+          <div className="flex items-center gap-2">
+            <RefreshCw className="h-3.5 w-3.5 text-yellow-400 animate-spin" />
+            <span className="text-yellow-400 font-extrabold uppercase tracking-wide text-[10px]">Fila de Sincronização Ativa</span>
+          </div>
+          <span className="text-white/80 font-medium text-[11px] leading-relaxed">{syncStatusMessage}</span>
+          <div className="w-full bg-slate-800 rounded-full h-1.5 mt-1 overflow-hidden">
+            <div
+              className="bg-yellow-400 h-1.5 rounded-full transition-all duration-300"
+              style={{ width: `${Math.max(5, syncProgress)}%` }}
+            ></div>
+          </div>
+          <span className="text-[9px] text-white/40 text-right font-mono block font-bold">{syncProgress}% Concluído</span>
         </div>
       )}
     </header>

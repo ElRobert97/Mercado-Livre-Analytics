@@ -3,8 +3,24 @@ import { CalculatedOrder, MercadoLivreAccount, ProductCost, CostImportBatch, Ord
 // Setup base URL which is empty by default since it proxies Express server
 const BASE_URL = "";
 
+function getAuthHeader(): { [key: string]: string } {
+  const token = localStorage.getItem("ml_user_token");
+  if (token) {
+    return { "Authorization": `Bearer ${token}` };
+  }
+  return {};
+}
+
+async function secureFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const headers = {
+    ...options.headers,
+    ...getAuthHeader()
+  };
+  return fetch(url, { ...options, headers });
+}
+
 export async function checkAuth() {
-  const res = await fetch(`${BASE_URL}/api/auth/me`);
+  const res = await secureFetch(`${BASE_URL}/api/auth/me`);
   return res.json();
 }
 
@@ -18,7 +34,11 @@ export async function login(email: string, password: string) {
     const err = await res.json();
     throw new Error(err.error || "Erro ao realizar login");
   }
-  return res.json();
+  const data = await res.json();
+  if (data.user && data.user.id) {
+    localStorage.setItem("ml_user_token", data.user.id);
+  }
+  return data;
 }
 
 export async function register(name: string, email: string, password: string) {
@@ -31,22 +51,27 @@ export async function register(name: string, email: string, password: string) {
     const err = await res.json();
     throw new Error(err.error || "Erro ao realizar cadastro");
   }
-  return res.json();
+  const data = await res.json();
+  if (data.user && data.user.id) {
+    localStorage.setItem("ml_user_token", data.user.id);
+  }
+  return data;
 }
 
 export async function logout() {
-  const res = await fetch(`${BASE_URL}/api/auth/logout`, { method: "POST" });
+  const res = await secureFetch(`${BASE_URL}/api/auth/logout`, { method: "POST" });
+  localStorage.removeItem("ml_user_token");
   return res.json();
 }
 
 export async function getMLAccounts(): Promise<MercadoLivreAccount[]> {
-  const res = await fetch(`${BASE_URL}/api/integrations/mercadolivre/accounts`);
+  const res = await secureFetch(`${BASE_URL}/api/integrations/mercadolivre/accounts`);
   if (!res.ok) throw new Error("Erro ao buscar contas integradas");
   return res.json();
 }
 
 export async function connectMockAccount(nickname: string): Promise<MercadoLivreAccount> {
-  const res = await fetch(`${BASE_URL}/api/integrations/mercadolivre/connect-simulation`, {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/mercadolivre/connect-simulation`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ nickname })
@@ -59,7 +84,7 @@ export async function connectMockAccount(nickname: string): Promise<MercadoLivre
 }
 
 export async function deleteMLAccount(id: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/integrations/mercadolivre/accounts/${id}`, {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/mercadolivre/accounts/${id}`, {
     method: "DELETE"
   });
   if (!res.ok) throw new Error("Erro ao remover conta integrada");
@@ -81,25 +106,42 @@ export async function getOrders(params: {
     }
   });
 
-  const res = await fetch(`${BASE_URL}/api/orders?${query.toString()}`);
+  const res = await secureFetch(`${BASE_URL}/api/orders?${query.toString()}`);
   if (!res.ok) throw new Error("Erro ao buscar pedidos");
   return res.json();
 }
 
 export async function getOrderDetails(id: string): Promise<CalculatedOrder> {
-  const res = await fetch(`${BASE_URL}/api/orders/${id}`);
+  const res = await secureFetch(`${BASE_URL}/api/orders/${id}`);
   if (!res.ok) throw new Error("Erro ao buscar detalhes do pedido");
   return res.json();
 }
 
-export async function syncMLOrders(dateFrom?: string, dateTo?: string): Promise<{ message: string; countSynced: number }> {
+export async function syncMLOrders(dateFrom?: string, dateTo?: string): Promise<{ message: string; jobId: string; status: string }> {
   const query = new URLSearchParams();
   if (dateFrom) query.set("dateFrom", dateFrom);
   if (dateTo) query.set("dateTo", dateTo);
-  const res = await fetch(`${BASE_URL}/api/orders/sync?${query.toString()}`, { method: "POST" });
+  const res = await secureFetch(`${BASE_URL}/api/orders/sync?${query.toString()}`, { method: "POST" });
   if (!res.ok) {
     const err = await res.json();
     throw new Error(err.error || "Erro ao sincronizar pedidos");
+  }
+  return res.json();
+}
+
+export async function getSyncJobStatus(id: string): Promise<{
+  id: string;
+  userId: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  progress: number;
+  message: string;
+  countSynced?: number;
+  error?: string;
+}> {
+  const res = await secureFetch(`${BASE_URL}/api/orders/sync/status/${id}`);
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || "Erro ao consultar status da tarefa");
   }
   return res.json();
 }
@@ -118,7 +160,7 @@ export async function getMLProducts(params: {
     }
   });
 
-  const res = await fetch(`${BASE_URL}/api/products?${query.toString()}`);
+  const res = await secureFetch(`${BASE_URL}/api/products?${query.toString()}`);
   if (!res.ok) {
     const err = await res.json();
     throw new Error(err.error || "Erro ao carregar anúncios");
@@ -139,7 +181,7 @@ export async function updateMLProduct(
     sku?: string;
   }
 ): Promise<{ success: boolean; message: string; item: any }> {
-  const res = await fetch(`${BASE_URL}/api/products/${id}`, {
+  const res = await secureFetch(`${BASE_URL}/api/products/${id}`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json"
@@ -154,7 +196,7 @@ export async function updateMLProduct(
 }
 
 export async function getProductCosts(): Promise<ProductCost[]> {
-  const res = await fetch(`${BASE_URL}/api/costs`);
+  const res = await secureFetch(`${BASE_URL}/api/costs`);
   if (!res.ok) throw new Error("Erro ao buscar custos de produtos");
   return res.json();
 }
@@ -165,7 +207,7 @@ export async function createOrUpdateCost(cost: {
   cost_unitary: number;
   currency?: string;
 }): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/costs`, {
+  const res = await secureFetch(`${BASE_URL}/api/costs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(cost)
@@ -177,12 +219,12 @@ export async function createOrUpdateCost(cost: {
 }
 
 export async function deleteCost(id: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/costs/${id}`, { method: "DELETE" });
+  const res = await secureFetch(`${BASE_URL}/api/costs/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error("Erro ao remover custo");
 }
 
 export async function importCostsCSV(csvData: string, fileName: string): Promise<{ message: string; batch: CostImportBatch }> {
-  const res = await fetch(`${BASE_URL}/api/costs/import`, {
+  const res = await secureFetch(`${BASE_URL}/api/costs/import`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ csvData, fileName })
@@ -195,7 +237,7 @@ export async function importCostsCSV(csvData: string, fileName: string): Promise
 }
 
 export async function getImportBatches(): Promise<CostImportBatch[]> {
-  const res = await fetch(`${BASE_URL}/api/costs/history/batches`);
+  const res = await secureFetch(`${BASE_URL}/api/costs/history/batches`);
   if (!res.ok) throw new Error("Erro ao buscar histórico de lotes");
   return res.json();
 }
@@ -220,7 +262,7 @@ export async function getDashboardOverview(dateFrom?: string, dateTo?: string): 
   const query = new URLSearchParams();
   if (dateFrom) query.set("dateFrom", dateFrom);
   if (dateTo) query.set("dateTo", dateTo);
-  const res = await fetch(`${BASE_URL}/api/dashboard/overview?${query.toString()}`);
+  const res = await secureFetch(`${BASE_URL}/api/dashboard/overview?${query.toString()}`);
   if (!res.ok) throw new Error("Erro ao buscar visão geral");
   return res.json();
 }
@@ -250,13 +292,13 @@ export async function getTopProducts(dateFrom?: string, dateTo?: string): Promis
   const query = new URLSearchParams();
   if (dateFrom) query.set("dateFrom", dateFrom);
   if (dateTo) query.set("dateTo", dateTo);
-  const res = await fetch(`${BASE_URL}/api/dashboard/top-products?${query.toString()}`);
+  const res = await secureFetch(`${BASE_URL}/api/dashboard/top-products?${query.toString()}`);
   if (!res.ok) throw new Error("Erro ao buscar produtos principais");
   return res.json();
 }
 
 export async function getOrdersWithoutCost(): Promise<CalculatedOrder[]> {
-  const res = await fetch(`${BASE_URL}/api/dashboard/orders-without-cost`);
+  const res = await secureFetch(`${BASE_URL}/api/dashboard/orders-without-cost`);
   if (!res.ok) throw new Error("Erro ao buscar itens pendentes de custo");
   return res.json();
 }
@@ -265,7 +307,7 @@ export async function getAiAdvisorReport(dateFrom?: string, dateTo?: string): Pr
   const query = new URLSearchParams();
   if (dateFrom) query.set("dateFrom", dateFrom);
   if (dateTo) query.set("dateTo", dateTo);
-  const res = await fetch(`${BASE_URL}/api/dashboard/ai-advisor?${query.toString()}`, { method: "POST" });
+  const res = await secureFetch(`${BASE_URL}/api/dashboard/ai-advisor?${query.toString()}`, { method: "POST" });
   if (!res.ok) {
     const err = await res.json();
     throw new Error(err.error || "Erro de resposta da IA");
@@ -274,16 +316,16 @@ export async function getAiAdvisorReport(dateFrom?: string, dateTo?: string): Pr
 }
 
 export async function getStateTaxFactors(): Promise<any[]> {
-  const res = await fetch(`${BASE_URL}/api/tax-factors`);
+  const res = await secureFetch(`${BASE_URL}/api/tax-factors`);
   if (!res.ok) throw new Error("Erro ao buscar fatores tributários");
   return res.json();
 }
 
 export async function updateStateTaxFactor(id: string, taxFactor: number, active: boolean): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/tax-factors/${id}`, {
+  const res = await secureFetch(`${BASE_URL}/api/tax-factors/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tax_factor: taxFactor, active })
+    body: JSON.stringify({ taxFactor, active })
   });
   if (!res.ok) {
     const err = await res.json();
@@ -292,22 +334,22 @@ export async function updateStateTaxFactor(id: string, taxFactor: number, active
 }
 
 export async function recalculateOrderProfit(): Promise<{ message: string }> {
-  const res = await fetch(`${BASE_URL}/api/orders/recalculate`, { method: "POST" });
+  const res = await secureFetch(`${BASE_URL}/api/orders/recalculate`, { method: "POST" });
   if (!res.ok) {
     const err = await res.json();
-    throw new Error(err.error || "Erro ao reprocessar lucros dos pedidos");
+    throw new Error(err.error || "Erro ao reprocessar os lucros dos pedidos");
   }
   return res.json();
 }
 
 export async function getStateTaxProfiles(): Promise<StateTaxProfile[]> {
-  const res = await fetch(`${BASE_URL}/api/tax-profiles`);
-  if (!res.ok) throw new Error("Erro ao buscar perfis tributários");
+  const res = await secureFetch(`${BASE_URL}/api/tax-profiles`);
+  if (!res.ok) throw new Error("Erro ao carregar perfis de impostos estaduais");
   return res.json();
 }
 
 export async function updateStateTaxProfile(profile: StateTaxProfile): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/tax-profiles/${profile.state_code}`, {
+  const res = await secureFetch(`${BASE_URL}/api/tax-profiles/${profile.state_code}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(profile)
@@ -327,8 +369,7 @@ export async function getSimulatorSkus(): Promise<Array<{
   median_fee: number;
   historical_sales_count: number;
 }>> {
-  const res = await fetch(`${BASE_URL}/api/simulator/skus`);
+  const res = await secureFetch(`${BASE_URL}/api/simulator/skus`);
   if (!res.ok) throw new Error("Erro ao carregar dados dos SKUs para o simulador");
   return res.json();
 }
-

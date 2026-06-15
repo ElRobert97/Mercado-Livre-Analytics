@@ -30,7 +30,7 @@ export default function KPIs({ metrics }: KPIsProps) {
       id: "cost",
       title: "Custo Total dos Pedidos",
       value: formatCurrency(metrics.total_cost),
-      desc: "Custo de aquisição (fornecedor) do estoque vendido",
+      desc: "Custo do produto junto a todas as taxas do ML",
       icon: ShoppingBag,
       color: "bg-purple-500/10 border-purple-500/20 text-purple-400",
       accent: "text-purple-300 font-black glow-purple",

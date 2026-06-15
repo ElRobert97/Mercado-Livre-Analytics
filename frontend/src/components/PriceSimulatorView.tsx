@@ -650,7 +650,7 @@ export default function PriceSimulatorView() {
                 </span>
               </div>
 
-              <div className="h-68 w-full">
+              <div className="h-[280px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={profitChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#ffffff08" />
@@ -830,7 +830,7 @@ export default function PriceSimulatorView() {
                 </p>
               </div>
 
-              <div className="h-68 w-full">
+              <div className="h-[280px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={stackedCostChartData} layout="vertical">
                     <CartesianGrid strokeDasharray="3 3" stroke="#ffffff08" />

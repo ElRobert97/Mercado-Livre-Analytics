@@ -8,7 +8,7 @@ import IntegrationsView from "./components/IntegrationsView";
 import AuthView from "./components/AuthView";
 import ProductsView from "./components/ProductsView";
 import PriceSimulatorView from "./components/PriceSimulatorView";
-import { checkAuth, getMLAccounts, syncMLOrders, logout } from "./services/api";
+import { checkAuth, getMLAccounts, syncMLOrders, logout, getSyncJobStatus } from "./services/api";
 import { MercadoLivreAccount } from "./types";
 import { Info, HelpCircle } from "lucide-react";
 
@@ -35,6 +35,8 @@ export default function App() {
   // Sincronização states
   const [syncing, setSyncing] = useState(false);
   const [syncSuccessMessage, setSyncSuccessMessage] = useState<string | null>(null);
+  const [syncProgress, setSyncProgress] = useState<number>(0);
+  const [syncStatusMessage, setSyncStatusMessage] = useState<string | null>(null);
 
   const fetchUserStatus = async () => {
     try {
@@ -84,21 +86,48 @@ export default function App() {
   const handleSyncOrders = async () => {
     setSyncing(true);
     setSyncSuccessMessage(null);
+    setSyncStatusMessage("Solicitando sincronização de vendas ao servidor...");
+    setSyncProgress(5);
     try {
       const res = await syncMLOrders();
-      setSyncSuccessMessage(res.message);
+      const jobId = res.jobId;
       
-      // Reload current tab states
-      loadAccounts();
-      
-      // Clear success visual indicator after 4 seconds
-      setTimeout(() => {
-        setSyncSuccessMessage(null);
-      }, 4000);
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await getSyncJobStatus(jobId);
+          setSyncProgress(statusRes.progress);
+          setSyncStatusMessage(statusRes.message);
+
+          if (statusRes.status === "completed") {
+            clearInterval(pollInterval);
+            setSyncSuccessMessage(statusRes.message);
+            setSyncing(false);
+            loadAccounts();
+            setTimeout(() => {
+              setSyncSuccessMessage(null);
+              setSyncStatusMessage(null);
+              setSyncProgress(0);
+            }, 6000);
+          } else if (statusRes.status === "failed") {
+            clearInterval(pollInterval);
+            alert(statusRes.error || statusRes.message || "A sincronização falhou.");
+            setSyncing(false);
+            setSyncStatusMessage(null);
+            setSyncProgress(0);
+          }
+        } catch (pollErr: any) {
+          clearInterval(pollInterval);
+          alert("Falha ao monitorar sincronização: " + pollErr.message);
+          setSyncing(false);
+          setSyncStatusMessage(null);
+          setSyncProgress(0);
+        }
+      }, 1500);
     } catch (err: any) {
       alert(err.message || "Erro durante sincronização de vendas");
-    } finally {
       setSyncing(false);
+      setSyncStatusMessage(null);
+      setSyncProgress(0);
     }
   };
 
@@ -161,6 +190,8 @@ export default function App() {
           syncSuccessMessage={syncSuccessMessage}
           sidebarOpen={sidebarOpen}
           onToggleSidebar={handleToggleSidebar}
+          syncProgress={syncProgress}
+          syncStatusMessage={syncStatusMessage}
         />
 
         {/* Scrollable primary dynamic tab viewpoint container */}
