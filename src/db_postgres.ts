@@ -31,7 +31,7 @@ export async function initPostgres(): Promise<void> {
         id VARCHAR(100) PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         email VARCHAR(100) UNIQUE NOT NULL,
-        password_hash VARCHAR(100) NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
@@ -147,6 +147,7 @@ export async function initPostgres(): Promise<void> {
 
     // Ensure older databases get the new columns for shipment address, cost details, and tax estimates
     await client.query(`
+      ALTER TABLE users ALTER COLUMN password_hash TYPE VARCHAR(255);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_city VARCHAR(255);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_municipality VARCHAR(255);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_state VARCHAR(255);

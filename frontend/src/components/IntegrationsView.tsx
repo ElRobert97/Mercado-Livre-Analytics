@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { connectMockAccount, deleteMLAccount } from "../services/api";
+import { connectMockAccount, deleteMLAccount, getMLConnectUrl } from "../services/api";
 import { MercadoLivreAccount } from "../types";
 import { Share2, Trash2, Key, RefreshCw, AlertTriangle, ShieldCheck, CheckCircle, Info, ExternalLink, Link2 } from "lucide-react";
 
@@ -16,14 +16,13 @@ export default function IntegrationsView({ accounts, onRefreshList }: Integratio
   const [realAuthUrl, setRealAuthUrl] = useState<string>("");
 
   useEffect(() => {
-    fetch("/api/integrations/mercadolivre/connect")
-      .then(res => res.json())
+    getMLConnectUrl()
       .then(data => {
         if (data && data.auth_url) {
           setRealAuthUrl(data.auth_url);
         }
       })
-      .catch(err => console.error("Error loaded OAuth connect URL:", err));
+      .catch(err => console.error("Error loading secure OAuth connect URL:", err));
   }, []);
 
   const handleSimulateConnect = async (e: React.FormEvent) => {

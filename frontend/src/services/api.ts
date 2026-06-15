@@ -70,6 +70,12 @@ export async function getMLAccounts(): Promise<MercadoLivreAccount[]> {
   return res.json();
 }
 
+export async function getMLConnectUrl(): Promise<{ auth_url: string; client_id: string; redirect_uri: string; state: string }> {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/mercadolivre/connect`);
+  if (!res.ok) throw new Error("Erro ao carregar URL de conexão do Mercado Livre");
+  return res.json();
+}
+
 export async function connectMockAccount(nickname: string): Promise<MercadoLivreAccount> {
   const res = await secureFetch(`${BASE_URL}/api/integrations/mercadolivre/connect-simulation`, {
     method: "POST",
