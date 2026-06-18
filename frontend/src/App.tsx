@@ -8,6 +8,8 @@ import IntegrationsView from "./components/IntegrationsView";
 import AuthView from "./components/AuthView";
 import ProductsView from "./components/ProductsView";
 import PriceSimulatorView from "./components/PriceSimulatorView";
+import GoogleDriveView from "./components/GoogleDriveView";
+import MelhorEnvioView from "./components/MelhorEnvioView";
 import { checkAuth, getMLAccounts, syncMLOrders, logout, getSyncJobStatus } from "./services/api";
 import { MercadoLivreAccount } from "./types";
 import { Info, HelpCircle } from "lucide-react";
@@ -65,6 +67,13 @@ export default function App() {
 
   useEffect(() => {
     fetchUserStatus();
+
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get("tab");
+    if (tabParam) {
+      setCurrentTab(tabParam);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
   }, []);
 
   const handleAuthSuccess = (loggedUser: { id: string; name: string; email: string }) => {
@@ -158,6 +167,10 @@ export default function App() {
         return <ProductsView />;
       case "simulator":
         return <PriceSimulatorView />;
+      case "melhorenvio":
+        return <MelhorEnvioView />;
+      case "gdrive":
+        return <GoogleDriveView />;
       case "integrations":
         return <IntegrationsView accounts={accounts} onRefreshList={loadAccounts} />;
       default:

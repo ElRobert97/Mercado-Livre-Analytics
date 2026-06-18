@@ -143,6 +143,17 @@ export async function initPostgres(): Promise<void> {
         rule_version VARCHAR(50) NOT NULL,
         calculated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS melhor_envio_config (
+        user_id VARCHAR(100) PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT,
+        token_expires_at TIMESTAMPTZ,
+        connected BOOLEAN DEFAULT true,
+        is_sandbox BOOLEAN DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
     // Ensure older databases get the new columns for shipment address, cost details, and tax estimates
@@ -748,5 +759,38 @@ export const dbOps = {
       rule_version: row.rule_version,
       calculated_at: row.calculated_at
     };
+  },
+
+  // --- MELHOR ENVIO CONFIG ---
+  async saveMelhorEnvioToken(userId: string, accessToken: string, refreshToken?: string, expiresAt?: string, isSandbox: boolean = false): Promise<void> {
+    await pool.query(
+      `INSERT INTO melhor_envio_config (user_id, access_token, refresh_token, token_expires_at, connected, is_sandbox, updated_at)
+       VALUES ($1, $2, $3, $4, true, $5, CURRENT_TIMESTAMP)
+       ON CONFLICT (user_id) DO UPDATE SET
+         access_token = EXCLUDED.access_token,
+         refresh_token = COALESCE(EXCLUDED.refresh_token, melhor_envio_config.refresh_token),
+         token_expires_at = COALESCE(EXCLUDED.token_expires_at, melhor_envio_config.token_expires_at),
+         connected = true,
+         is_sandbox = EXCLUDED.is_sandbox,
+         updated_at = CURRENT_TIMESTAMP`,
+      [userId, accessToken, refreshToken || null, expiresAt || null, isSandbox]
+    );
+  },
+
+  async getMelhorEnvioToken(userId: string): Promise<{ access_token: string, refresh_token: string | null, token_expires_at: string | null, connected: boolean, is_sandbox: boolean } | null> {
+    const res = await pool.query("SELECT * FROM melhor_envio_config WHERE user_id = $1", [userId]);
+    if (res.rows.length === 0) return null;
+    const row = res.rows[0];
+    return {
+      access_token: row.access_token,
+      refresh_token: row.refresh_token,
+      token_expires_at: row.token_expires_at,
+      connected: row.connected,
+      is_sandbox: row.is_sandbox
+    };
+  },
+
+  async deleteMelhorEnvioToken(userId: string): Promise<void> {
+    await pool.query("DELETE FROM melhor_envio_config WHERE user_id = $1", [userId]);
   }
 };

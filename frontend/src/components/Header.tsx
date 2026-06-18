@@ -34,6 +34,12 @@ export default function Header({
         return "Painel de Custos";
       case "products":
         return "Gestão de Anúncios";
+      case "simulator":
+        return "Simulador de Rentabilidade";
+      case "melhorenvio":
+        return "Logística Melhor Envio";
+      case "gdrive":
+        return "Backup & Google Drive";
       case "integrations":
         return "Contas e Canais Integrados";
       default:
@@ -51,6 +57,12 @@ export default function Header({
         return "Visualize custos por SKU de produtos e faça importações em lote (CSV).";
       case "products":
         return "Visualize miniaturas, preços, categorias oficiais, estoques e fichas técnicas de seus anúncios integrados.";
+      case "simulator":
+        return "Faça simulações de anúncios, calcule custos fiscais e determine margens de lucro líquido.";
+      case "melhorenvio":
+        return "Cote tarifas logísticas e realize comparações de frete frente à tabela do Mercado Livre.";
+      case "gdrive":
+        return "Gerencie seus backups de SKUs e relatórios de rentabilidade direto no Google Drive.";
       case "integrations":
         return "Gerencie os tokens e credenciais das suas lojas oficiais conectadas.";
       default:

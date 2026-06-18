@@ -134,6 +134,7 @@ export interface CalculatedOrder {
   shipping_state?: string;
   shipping_cost_detail?: number;
   ml_shipment_id?: string;
+  created_at?: string;
 }
 
 export type TaxProfileSourceType = "report" | "median" | "manual_override";

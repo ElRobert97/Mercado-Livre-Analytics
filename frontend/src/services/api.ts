@@ -76,6 +76,12 @@ export async function getMLConnectUrl(): Promise<{ auth_url: string; client_id: 
   return res.json();
 }
 
+export async function getMelhorEnvioConnectUrl(): Promise<{ auth_url: string; client_id: string; redirect_uri: string; state: string }> {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/connect`);
+  if (!res.ok) throw new Error("Erro ao carregar URL de conexão do Melhor Envio");
+  return res.json();
+}
+
 export async function connectMockAccount(nickname: string): Promise<MercadoLivreAccount> {
   const res = await secureFetch(`${BASE_URL}/api/integrations/mercadolivre/connect-simulation`, {
     method: "POST",
@@ -377,5 +383,55 @@ export async function getSimulatorSkus(): Promise<Array<{
 }>> {
   const res = await secureFetch(`${BASE_URL}/api/simulator/skus`);
   if (!res.ok) throw new Error("Erro ao carregar dados dos SKUs para o simulador");
+  return res.json();
+}
+
+export async function getMelhorEnvioStatus(): Promise<{ connected: boolean; is_sandbox?: boolean }> {
+  try {
+    const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/status`);
+    if (!res.ok) return { connected: false };
+    return res.json();
+  } catch {
+    return { connected: false };
+  }
+}
+
+export async function saveMelhorEnvioTokenServer(token: string, isSandbox: boolean = false): Promise<any> {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/save-token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, is_sandbox: isSandbox })
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || "Erro ao salvar token de conexão");
+  }
+  return res.json();
+}
+
+export async function disconnectMelhorEnvioServer(): Promise<any> {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/disconnect`, {
+    method: "POST"
+  });
+  if (!res.ok) throw new Error("Erro ao desconectar do Melhor Envio");
+  return res.json();
+}
+
+export async function getMelhorEnvioLabelsReal(): Promise<{ labels: any[]; connected: boolean; real: boolean }> {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/labels`);
+  if (!res.ok) throw new Error("Erro ao carregar etiquetas reais");
+  return res.json();
+}
+
+export async function calculateMelhorEnvioQuoteReal(req: any): Promise<any[]> {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/quote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req)
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || "Erro ao calcular frete no Melhor Envio");
+  }
   return res.json();
 }

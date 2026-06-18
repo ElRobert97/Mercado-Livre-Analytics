@@ -1,4 +1,4 @@
-import { LayoutDashboard, ShoppingCart, Tag, Share2, LogOut, Receipt, Package, Calculator } from "lucide-react";
+import { LayoutDashboard, ShoppingCart, Tag, Share2, LogOut, Receipt, Package, Calculator, Cloud, Truck } from "lucide-react";
 
 interface SidebarProps {
   currentTab: string;
@@ -16,6 +16,8 @@ export default function Sidebar({ currentTab, onTabChange, userName, userEmail, 
     { id: "costs", label: "Custos por SKU", icon: Tag },
     { id: "products", label: "Anúncios", icon: Package },
     { id: "simulator", label: "Simulador de Preço", icon: Calculator },
+    { id: "melhorenvio", label: "Melhor Envio", icon: Truck },
+    { id: "gdrive", label: "Google Drive Nuvem", icon: Cloud },
     { id: "integrations", label: "Integrações ML", icon: Share2 },
   ];
 

@@ -570,6 +570,7 @@ async function startServer() {
         ml_shipment_id: order.ml_shipment_id || undefined,
         ml_account_id: order.ml_account_id,
         updated_at: order.updated_at,
+        created_at: order.created_at,
         taxFactor,
         tax_cost,
         difal_factor,
@@ -649,7 +650,8 @@ async function startServer() {
           shipping_municipality: order.shipping_municipality,
           shipping_state: order.shipping_state,
           shipping_cost_detail: order.shipping_cost_detail > 0 ? order.shipping_cost_detail : undefined,
-          ml_shipment_id: order.ml_shipment_id
+          ml_shipment_id: order.ml_shipment_id,
+          created_at: order.created_at
         };
       }
 
@@ -724,7 +726,8 @@ async function startServer() {
         shipping_municipality: primary.shipping_municipality,
         shipping_state: primary.shipping_state,
         shipping_cost_detail: shipping_cost_detail > 0 ? shipping_cost_detail : undefined,
-        ml_shipment_id: primary.ml_shipment_id
+        ml_shipment_id: primary.ml_shipment_id,
+        created_at: primary.created_at
       };
     }
   }
@@ -944,6 +947,357 @@ async function startServer() {
     } catch (realAuthErr: any) {
       console.error("Real ML OAuth callback error:", realAuthErr);
       res.status(500).send(`Erro na integração com Mercado Livre: ${realAuthErr.message}`);
+    }
+  });
+
+  function getMelhorEnvioRedirectUri(req: any): string {
+    if (process.env.MELHOR_ENVIO_REDIRECT_URI) {
+      return process.env.MELHOR_ENVIO_REDIRECT_URI.trim();
+    }
+    const state = req.query && req.query.state ? String(req.query.state) : "";
+    const isSandbox = req.path.includes("teste") || req.url.includes("teste") || state.includes("teste");
+    
+    if (isSandbox) {
+      return "https://clingingly-cavitied-elizbeth.ngrok-free.dev/melhor-envio/teste";
+    } else {
+      return "https://clingingly-cavitied-elizbeth.ngrok-free.dev/melhor-envio";
+    }
+  }
+
+  app.get("/api/integrations/melhorenvio/connect", requireAuth, (req, res) => {
+    const query = req.query;
+    const rawId = process.env.MELHOR_ENVIO_ID || process.env.MELHOR_ENVIO_CLIENT_ID;
+    const clientId = rawId ? String(rawId).replace(/[\s\n\r]/g, "") : "";
+    const redirectUri = getMelhorEnvioRedirectUri(req);
+    const userId = getUserIdFromRequest(req);
+    const state = String(query.state || userId || "state_rand");
+
+    const isSandbox = req.path.includes("teste") || req.url.includes("teste") || state.includes("teste");
+    const baseUrl = isSandbox ? "https://sandbox.melhorenvio.com.br" : "https://melhorenvio.com.br";
+
+    const scopes = "cart-read cart-write companies-read companies-write coupons-read coupons-write notifications-read orders-read products-read products-write purchases-read shipping-calculate shipping-cancel shipping-checkout shipping-companies shipping-generate shipping-preview shipping-print shipping-share shipping-tracking ecommerce-shipping transactions-read users-read users-write";
+    const authUrl = `${baseUrl}/oauth/authorize?client_id=${clientId || ""}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&state=${state}&scope=${encodeURIComponent(scopes)}`;
+
+    res.json({
+      auth_url: authUrl,
+      client_id: clientId || null,
+      redirect_uri: redirectUri,
+      state
+    });
+  });
+
+  app.get([
+    "/auth/melhorenvio/callback", 
+    "/auth/melhorenvio/callback/", 
+    "/api/integrations/melhorenvio/callback", 
+    "/api/integrations/melhorenvio/callback/", 
+    "/melhor-envio/auth/callback", 
+    "/melhor-envio/auth/callback/", 
+    "/melhor-envio", 
+    "/melhor-envio/teste"
+  ], async (req, res) => {
+    const { code, state } = req.query;
+
+    if (!code) {
+      return res.status(400).send("Código de autorização ausente da url callback.");
+    }
+
+    const rawId = process.env.MELHOR_ENVIO_ID || process.env.MELHOR_ENVIO_CLIENT_ID;
+    const rawSecret = process.env.MELHOR_ENVIO_SECRET || process.env.MELHOR_ENVIO_CLIENT_SECRET;
+
+    const clientId = rawId ? String(rawId).replace(/[\s\n\r]/g, "") : "";
+    const clientSecret = rawSecret ? String(rawSecret).trim() : "";
+
+    if (!clientId || !clientSecret) {
+      return res.send(`
+        <html>
+          <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #0f1025; padding: 20px; color: white;">
+            <div style="background: rgba(255,255,255,0.03); border: 1px border rgba(255,255,255,0.1); padding: 40px; border-radius: 20px; text-align: center; max-width: 500px; width:100%; box-shadow: 0 8px 32px rgba(0,0,0,0.4); backdrop-filter: blur(12px);">
+              <svg style="color: #FFE600; width: 64px; height: 64px; margin: auto;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+              <h2 style="color: #FFE600; margin-top: 20px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px;">Credenciais Ausentes</h2>
+              <p style="color: rgba(255,255,255,0.6); margin-top: 15px; font-size: 13px; line-height: 1.6;">O callback de autenticação foi alcançado, mas a sua aplicação ainda não possui as variáveis de ambiente <code>MELHOR_ENVIO_ID</code> e <code>MELHOR_ENVIO_SECRET</code> em seu arquivo <code>.env</code> do painel de controle do AI Studio.</p>
+              <button onclick="window.close()" style="margin-top: 25px; background: #3483FA; color: white; border: none; padding: 12px 24px; border-radius: 12px; font-weight: bold; cursor: pointer; transition: opacity 0.2s;">FECHAR ABA</button>
+            </div>
+          </body>
+        </html>
+      `);
+    }
+
+    try {
+      const isSandbox = req.path.includes("teste") || req.url.includes("teste") || (state && String(state).includes("teste"));
+      const baseUrl = isSandbox ? "https://sandbox.melhorenvio.com.br" : "https://melhorenvio.com.br";
+      const redirectUri = getMelhorEnvioRedirectUri(req);
+
+      console.log(`[MELHOR ENVIO] Starting token exchange. Sandbox is: ${isSandbox}. Redirect URI is: ${redirectUri}`);
+
+      const bodyData = {
+        grant_type: "authorization_code",
+        client_id: clientId,
+        client_secret: clientSecret,
+        code: String(code),
+        redirect_uri: redirectUri
+      };
+
+      let tokenResponse;
+      let errorDetails = "";
+
+      // Try 1: JSON body (passing client_id as number if appropriate)
+      try {
+        console.log(`[MELHOR ENVIO] Attempting token exchange using content-type: application/json`);
+        tokenResponse = await fetch(`${baseUrl}/oauth/token`, {
+          method: "POST",
+          headers: { 
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "eliasrobert45@gmail.com",
+            "email": "eliasrobert45@gmail.com"
+          },
+          body: JSON.stringify({
+            ...bodyData,
+            client_id: /^\d+$/.test(clientId) ? Number(clientId) : clientId
+          })
+        });
+
+        if (!tokenResponse.ok) {
+          const rawErr = await tokenResponse.clone().text();
+          errorDetails = `JSON error: ${rawErr}`;
+          console.warn(`[MELHOR ENVIO] JSON token request failed: ${rawErr}`);
+          throw new Error("JSON_FAILED");
+        }
+      } catch (jsonErr) {
+        // Try 2: Fallback with standard urlencoded form payload
+        console.log(`[MELHOR ENVIO] Falling back to request with content-type: application/x-www-form-urlencoded`);
+        tokenResponse = await fetch(`${baseUrl}/oauth/token`, {
+          method: "POST",
+          headers: { 
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "User-Agent": "eliasrobert45@gmail.com",
+            "email": "eliasrobert45@gmail.com"
+          },
+          body: new URLSearchParams(bodyData).toString()
+        });
+      }
+
+      if (!tokenResponse.ok) {
+        const errorText = await tokenResponse.text();
+        throw new Error(`Troca de código por token falhou em ambos os formatos. Resposta do Melhor Envio: ${errorText} | Detalhes anteriores: ${errorDetails}`);
+      }
+
+      const tokenData = await tokenResponse.json();
+      const accessToken = tokenData.access_token;
+      
+      const userIdFromState = state && String(state) !== "state_rand" && String(state) !== "teste" ? String(state) : null;
+      if (userIdFromState) {
+        let expiresAtStr: string | undefined;
+        if (tokenData.expires_in) {
+          expiresAtStr = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
+        }
+        await dbOps.saveMelhorEnvioToken(userIdFromState, accessToken, tokenData.refresh_token, expiresAtStr, isSandbox);
+        console.log(`[MELHOR ENVIO] Successfully persisted token to Postgres for user ${userIdFromState}. Sandbox: ${isSandbox}`);
+      }
+
+      res.send(`
+        <html>
+          <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #0f1025; padding: 20px; color: white;">
+            <div style="background: rgba(255,255,255,0.03); border: 1px border rgba(255,255,255,0.1); padding: 40px; border-radius: 20px; text-align: center; max-width: 400px; width:100%; box-shadow: 0 8px 32px rgba(0,0,0,0.4); backdrop-filter: blur(12px);">
+              <svg style="color: #00FF66; width: 64px; height: 64px; margin: auto;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+              <h2 style="color: #00FF66; margin-top: 20px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px;">Melhor Envio Conectado!</h2>
+              <p style="color: rgba(255,255,255,0.7); margin-top: 10px; font-size: 13px; line-height: 1.6;">O token de produção real do Melhor Envio foi gerado e associado à sua sessão segura.</p>
+              <p style="color: rgba(255,255,255,0.40); margin-top: 10px; font-size: 11px;">Aguarde, atualizando seu painel...</p>
+              <script>
+                try {
+                  localStorage.setItem("meli_analytics_me_token", "${accessToken}");
+                  localStorage.setItem("meli_analytics_me_connected", "true");
+                } catch(e) {
+                  console.error(e);
+                }
+                setTimeout(() => {
+                  window.location.href = "/?tab=melhorenvio";
+                }, 1500);
+              </script>
+            </div>
+          </body>
+        </html>
+      `);
+    } catch (realAuthErr: any) {
+      console.error("Real Melhor Envio OAuth callback error:", realAuthErr);
+      res.status(500).send(`Erro na integração com Melhor Envio: ${realAuthErr.message}`);
+    }
+  });
+
+  app.get("/api/integrations/melhorenvio/status", requireAuth, async (req, res) => {
+    try {
+      const userId = getUserIdFromRequest(req);
+      const conf = await dbOps.getMelhorEnvioToken(userId);
+      if (conf && conf.connected) {
+        return res.json({ connected: true, is_sandbox: conf.is_sandbox });
+      }
+      return res.json({ connected: false });
+    } catch (err: any) {
+      console.error("Error getting ME status:", err);
+      res.status(500).json({ error: "Erro ao obter status do Melhor Envio" });
+    }
+  });
+
+  app.post("/api/integrations/melhorenvio/save-token", requireAuth, async (req, res) => {
+    try {
+      const userId = getUserIdFromRequest(req);
+      const { token, is_sandbox } = req.body;
+      if (!token) {
+        return res.status(400).json({ error: "Token é obrigatório" });
+      }
+      await dbOps.saveMelhorEnvioToken(userId, token, undefined, undefined, !!is_sandbox);
+      res.json({ success: true, message: "Token salvo com sucesso." });
+    } catch (err: any) {
+      console.error("Error saving ME token:", err);
+      res.status(500).json({ error: "Erro ao salvar token" });
+    }
+  });
+
+  app.post("/api/integrations/melhorenvio/disconnect", requireAuth, async (req, res) => {
+    try {
+      const userId = getUserIdFromRequest(req);
+      await dbOps.deleteMelhorEnvioToken(userId);
+      res.json({ success: true, message: "Conexão com Melhor Envio encerrada" });
+    } catch (err: any) {
+      console.error("Error disconnecting ME:", err);
+      res.status(500).json({ error: "Erro ao desconectar Melhor Envio" });
+    }
+  });
+
+  app.get("/api/integrations/melhorenvio/labels", requireAuth, async (req, res) => {
+    try {
+      const userId = getUserIdFromRequest(req);
+      const meConfig = await dbOps.getMelhorEnvioToken(userId);
+      if (!meConfig || !meConfig.connected) {
+        return res.json({ labels: [], connected: false });
+      }
+
+      const baseUrl = meConfig.is_sandbox ? "https://sandbox.melhorenvio.com.br" : "https://melhorenvio.com.br";
+      console.log(`[MELHOR ENVIO] Fetching real labels from ${baseUrl} for user ${userId}`);
+
+      try {
+        const response = await fetch(`${baseUrl}/api/v2/me/shipment/report`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${meConfig.access_token}`,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "eliasrobert45@gmail.com"
+          }
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          let labels = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : []);
+          return res.json({ labels, connected: true, real: true });
+        } else {
+          const errText = await response.text();
+          console.warn(`[MELHOR ENVIO] Report API status ${response.status}: ${errText}`);
+          
+          let fallbackUrl = `${baseUrl}/api/v2/me/shipments`;
+          const responseGet = await fetch(fallbackUrl, {
+            method: "GET",
+            headers: {
+              "Authorization": `Bearer ${meConfig.access_token}`,
+              "Accept": "application/json",
+              "User-Agent": "eliasrobert45@gmail.com"
+            }
+          });
+          if (responseGet.ok) {
+            const dataGet = await responseGet.json();
+            let labels = Array.isArray(dataGet) ? dataGet : (dataGet && Array.isArray(dataGet.data) ? dataGet.data : []);
+            return res.json({ labels, connected: true, real: true });
+          } else {
+            const errGet = await responseGet.text();
+            console.warn(`[MELHOR ENVIO] GET /shipments failure: ${errGet}`);
+          }
+        }
+      } catch (fetchErr: any) {
+        console.error("[MELHOR ENVIO] Error calling ME API:", fetchErr.message);
+      }
+
+      return res.json({ labels: [], connected: true, real: true });
+    } catch (err: any) {
+      console.error("Error retrieving ME labels:", err);
+      res.status(500).json({ error: "Erro ao carregar etiquetas do Melhor Envio" });
+    }
+  });
+
+  app.post("/api/integrations/melhorenvio/quote", requireAuth, async (req, res) => {
+    try {
+      const userId = getUserIdFromRequest(req);
+      const meConfig = await dbOps.getMelhorEnvioToken(userId);
+      if (!meConfig || !meConfig.connected) {
+        return res.json({ connected: false });
+      }
+
+      const { fromPostalCode, toPostalCode, weight, width, height, length } = req.body;
+      const baseUrl = meConfig.is_sandbox ? "https://sandbox.melhorenvio.com.br" : "https://melhorenvio.com.br";
+
+      const payload = {
+        from: {
+          postal_code: fromPostalCode.replace(/\D/g, "")
+        },
+        to: {
+          postal_code: toPostalCode.replace(/\D/g, "")
+        },
+        products: [
+          {
+            id: "default_item",
+            width: Number(width) || 10,
+            height: Number(height) || 10,
+            length: Number(length) || 10,
+            weight: Number(weight) || 1,
+            insurance_value: 0,
+            quantity: 1
+          }
+        ]
+      };
+
+      const response = await fetch(`${baseUrl}/api/v2/me/shipment/calculate`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${meConfig.access_token}`,
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "User-Agent": "eliasrobert45@gmail.com"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.warn(`[MELHOR ENVIO] Calculate returned error: ${errorText}`);
+        return res.status(response.status).json({ error: errorText });
+      }
+
+      const data = await response.json();
+      const list = Array.isArray(data) ? data : [];
+      const formatted = list.map((item: any) => ({
+        id: item.id,
+        name: item.name,
+        price: item.price ? Number(item.price) : 0,
+        custom_price: item.custom_price ? Number(item.custom_price) : (item.price ? Number(item.price) : 0),
+        discount: item.discount ? Number(item.discount) : 0,
+        delivery_time: item.delivery_time || 0,
+        error: item.error || null,
+        company: item.company ? {
+          id: item.company.id,
+          name: item.company.name,
+          picture: item.company.picture || `https://api.dicebear.com/7.x/initials/svg?seed=${item.company.name}`
+        } : {
+          id: item.id,
+          name: item.name || "Transportadora",
+          picture: "https://api.dicebear.com/7.x/initials/svg?seed=ME"
+        }
+      }));
+
+      return res.json({ connected: true, quotes: formatted });
+    } catch (err: any) {
+      console.error("Error calculating Melhor Envio quote:", err);
+      res.status(500).json({ error: "Erro ao cotar frete no Melhor Envio" });
     }
   });
 
