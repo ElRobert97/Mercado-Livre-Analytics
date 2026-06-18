@@ -386,7 +386,7 @@ export async function getSimulatorSkus(): Promise<Array<{
   return res.json();
 }
 
-export async function getMelhorEnvioStatus(): Promise<{ connected: boolean; is_sandbox?: boolean }> {
+export async function getMelhorEnvioStatus(): Promise<{ connected: boolean }> {
   try {
     const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/status`);
     if (!res.ok) return { connected: false };
@@ -396,11 +396,11 @@ export async function getMelhorEnvioStatus(): Promise<{ connected: boolean; is_s
   }
 }
 
-export async function saveMelhorEnvioTokenServer(token: string, isSandbox: boolean = false): Promise<any> {
+export async function saveMelhorEnvioTokenServer(token: string): Promise<any> {
   const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/save-token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token, is_sandbox: isSandbox })
+    body: JSON.stringify({ token })
   });
   if (!res.ok) {
     const err = await res.json();
@@ -423,7 +423,7 @@ export async function getMelhorEnvioLabelsReal(): Promise<{ labels: any[]; conne
   return res.json();
 }
 
-export async function calculateMelhorEnvioQuoteReal(req: any): Promise<any[]> {
+export async function calculateMelhorEnvioQuoteReal(req: any): Promise<{ connected: boolean; quotes?: any[]; error?: string }> {
   const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/quote`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -435,3 +435,18 @@ export async function calculateMelhorEnvioQuoteReal(req: any): Promise<any[]> {
   }
   return res.json();
 }
+
+export async function getMelhorEnvioLogs(): Promise<{ logs: any[] }> {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/logs`);
+  if (!res.ok) throw new Error("Erro ao buscar histórico de logs.");
+  return res.json();
+}
+
+export async function clearMelhorEnvioLogs(): Promise<{ success: boolean; message: string }> {
+  const res = await secureFetch(`${BASE_URL}/api/integrations/melhorenvio/logs/clear`, {
+    method: "POST"
+  });
+  if (!res.ok) throw new Error("Erro ao limpar histórico de logs.");
+  return res.json();
+}
+

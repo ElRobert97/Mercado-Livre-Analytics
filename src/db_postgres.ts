@@ -154,6 +154,16 @@ export async function initPostgres(): Promise<void> {
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS melhor_envio_oauth_logs (
+        id VARCHAR(100) PRIMARY KEY,
+        user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        step VARCHAR(100) NOT NULL,
+        status VARCHAR(20) NOT NULL,
+        message TEXT NOT NULL,
+        response_body TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
     // Ensure older databases get the new columns for shipment address, cost details, and tax estimates
@@ -792,5 +802,39 @@ export const dbOps = {
 
   async deleteMelhorEnvioToken(userId: string): Promise<void> {
     await pool.query("DELETE FROM melhor_envio_config WHERE user_id = $1", [userId]);
+  },
+
+  async addMelhorEnvioLog(userId: string, step: string, status: 'INFO' | 'SUCCESS' | 'ERROR', message: string, responseBody?: string): Promise<void> {
+    try {
+      const logId = `log_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+      await pool.query(
+        `INSERT INTO melhor_envio_oauth_logs (id, user_id, step, status, message, response_body, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)`,
+        [logId, userId, step, status, message, responseBody || null]
+      );
+    } catch (err) {
+      console.error("Error writing to melhor_envio_oauth_logs table:", err);
+    }
+  },
+
+  async getMelhorEnvioLogs(userId: string): Promise<any[]> {
+    try {
+      const res = await pool.query(
+        "SELECT * FROM melhor_envio_oauth_logs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50",
+        [userId]
+      );
+      return res.rows;
+    } catch (err) {
+      console.error("Error reading from melhor_envio_oauth_logs table:", err);
+      return [];
+    }
+  },
+
+  async clearMelhorEnvioLogs(userId: string): Promise<void> {
+    try {
+      await pool.query("DELETE FROM melhor_envio_oauth_logs WHERE user_id = $1", [userId]);
+    } catch (err) {
+      console.error("Error clearing melhor_envio_oauth_logs table:", err);
+    }
   }
 };

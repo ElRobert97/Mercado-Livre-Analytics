@@ -163,3 +163,15 @@ export interface OrderTaxSummary {
   rule_version: string;
   calculated_at: string;
 }
+
+export interface SyncJob {
+  id: string;
+  userId: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  progress: number;
+  message: string;
+  countSynced?: number;
+  error?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}

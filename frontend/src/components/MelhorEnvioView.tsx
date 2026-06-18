@@ -39,7 +39,9 @@ import {
   saveMelhorEnvioTokenServer,
   disconnectMelhorEnvioServer,
   getMelhorEnvioLabelsReal,
-  calculateMelhorEnvioQuoteReal
+  calculateMelhorEnvioQuoteReal,
+  getMelhorEnvioLogs,
+  clearMelhorEnvioLogs
 } from "../services/api";
 import { CalculatedOrder } from "../types";
 import { 
@@ -72,6 +74,10 @@ export default function MelhorEnvioView() {
   const [activeSubTab, setActiveSubTab] = useState<"quote" | "comparison" | "debug">("quote");
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Integration Logs State
+  const [integrationLogs, setIntegrationLogs] = useState<any[]>([]);
+  const [loadingLogs, setLoadingLogs] = useState<boolean>(false);
 
   // Quote state
   const [originCEP, setOriginCEP] = useState("96020360");
@@ -141,18 +147,18 @@ export default function MelhorEnvioView() {
   // Debug payload viewer state
   const [debugResponseType, setDebugResponseType] = useState<"200" | "400">("200");
 
-  useEffect(() => {
-    const init = async () => {
-      try {
-        const status = await getMelhorEnvioStatus();
-        setConnected(status.connected);
-        await loadComparisonData(status.connected);
-      } catch (err) {
-        console.error("Error loading secure status:", err);
-        await loadComparisonData(false);
-      }
-    };
+  const init = async () => {
+    try {
+      const status = await getMelhorEnvioStatus();
+      setConnected(status.connected);
+      await loadComparisonData(status.connected);
+    } catch (err) {
+      console.error("Error loading secure status:", err);
+      await loadComparisonData(false);
+    }
+  };
 
+  useEffect(() => {
     init();
 
     getMelhorEnvioConnectUrl()
@@ -162,11 +168,124 @@ export default function MelhorEnvioView() {
         }
       })
       .catch(err => console.error("Error loading secure Melhor Envio connect URL:", err));
+
+    // Listen for popup callback message
+    const handleMessage = async (event: MessageEvent) => {
+      const origin = event.origin;
+      const isAllowed = 
+        origin === window.location.origin || 
+        origin.endsWith(".run.app") || 
+        origin.includes("localhost") || 
+        origin.includes("127.0.0.1") ||
+        origin.includes("ngrok-free.dev");
+
+      if (!isAllowed) {
+        return;
+      }
+      
+      if (event.data?.type === "OAUTH_AUTH_SUCCESS") {
+        const { accessToken } = event.data;
+        try {
+          if (accessToken) {
+            console.log("[MelhorEnvioView] Received OAuth access token from popup. Saving to backend secure store...");
+            await saveMelhorEnvioTokenServer(accessToken);
+          }
+          setConnected(true);
+          init();
+          setSuccessMsg("Integração com Melhor Envio estabelecida com sucesso!");
+          setTimeout(() => setSuccessMsg(null), 5000);
+        } catch (saveErr: any) {
+          console.error("Failed to automatically save popup OAuth token on the backend:", saveErr);
+          setErrorMsg(saveErr.message || "Erro ao salvar token recebido da autenticação.");
+        }
+      }
+    };
+    window.addEventListener("message", handleMessage);
+
+    // Initial fetch of integration steps logs
+    fetchLogs();
+
+    // Poller to show logs updates in near real-time (every 5 seconds)
+    const logsPoller = setInterval(() => {
+      fetchLogs();
+    }, 5000);
+
+    return () => {
+      window.removeEventListener("message", handleMessage);
+      clearInterval(logsPoller);
+    };
   }, []);
+
+  const fetchLogs = async () => {
+    try {
+      const res = await getMelhorEnvioLogs();
+      setIntegrationLogs(res.logs || []);
+    } catch (err) {
+      console.error("Failed to load secure webhook/auth step logs:", err);
+    }
+  };
+
+  const handleClearLogs = async () => {
+    try {
+      setLoadingLogs(true);
+      await clearMelhorEnvioLogs();
+      setIntegrationLogs([]);
+      setSuccessMsg("Histórico de logs de auditoria limpo com sucesso.");
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Erro ao limpar registros de logs.");
+    } finally {
+      setLoadingLogs(false);
+    }
+  };
+
+  const handleConnectRealOAuthRedirect = async () => {
+    try {
+      setErrorMsg(null);
+      setSuccessMsg("Redirecionando para o portal de autorização do Melhor Envio...");
+      const data = await getMelhorEnvioConnectUrl();
+      if (data && data.auth_url) {
+        console.log("[MelhorEnvio] Dynamic redirection to:", data.auth_url);
+        window.location.href = data.auth_url;
+      } else {
+        throw new Error("Não foi possível gerar a URL de autorização.");
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || "Erro ao obter a URL de autorização.");
+      setSuccessMsg(null);
+    }
+  };
+
+  const handleConnectRealOAuthPopup = async () => {
+    try {
+      setErrorMsg(null);
+      setSuccessMsg("Abrindo janela de autorização do Melhor Envio...");
+      const data = await getMelhorEnvioConnectUrl();
+      if (!data || !data.auth_url) {
+        throw new Error("Não foi possível gerar a URL de autorização.");
+      }
+      const width = 600;
+      const height = 750;
+      const left = window.screen.width / 2 - width / 2;
+      const top = window.screen.height / 2 - height / 2;
+      const popup = window.open(
+        data.auth_url,
+        "melhor_envio_oauth_popup",
+        `width=${width},height=${height},top=${top},left=${left},resizable=yes,scrollbars=yes`
+      );
+      if (!popup) {
+        throw new Error("O bloqueador de pop-ups bloqueou a abertura da janela. Por favor, permita pop-ups para este site.");
+      }
+      setSuccessMsg(null);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Erro ao abrir painel de autenticação.");
+      setSuccessMsg(null);
+    }
+  };
 
   const handleConnectSimulated = async () => {
     try {
-      await saveMelhorEnvioTokenServer("simulated_prod_token_melhorenvio_2026_xyz", true);
+      await saveMelhorEnvioTokenServer("simulated_prod_token_melhorenvio_2026_xyz");
       setConnected(true);
       await loadComparisonData(true);
       setSuccessMsg("Integração com Melhor Envio Simulação/Production estabelecida com sucesso!");
@@ -183,7 +302,7 @@ export default function MelhorEnvioView() {
       return;
     }
     try {
-      await saveMelhorEnvioTokenServer(tokenInput, false);
+      await saveMelhorEnvioTokenServer(tokenInput);
       setConnected(true);
       await loadComparisonData(true);
       setSuccessMsg("Token real do Melhor Envio conectado no sistema.");
@@ -210,11 +329,21 @@ export default function MelhorEnvioView() {
     e.preventDefault();
     setQuoting(true);
     setErrorMsg(null);
+
+    const cleanOrigin = originCEP.replace(/\D/g, "");
+    const cleanDest = destCEP.replace(/\D/g, "");
+
+    if (cleanOrigin.length !== 8 || cleanDest.length !== 8) {
+      setErrorMsg("CEP inválido informado para simulação. Tanto o CEP de Origem quanto o de Destino precisam ter exatamente 8 números (ex: 96020-360 ou 96020360).");
+      setQuoting(false);
+      return;
+    }
+
     try {
       if (connected) {
         const quoteRes = await calculateMelhorEnvioQuoteReal({
-          fromPostalCode: originCEP,
-          toPostalCode: destCEP,
+          fromPostalCode: cleanOrigin,
+          toPostalCode: cleanDest,
           weight,
           width,
           height,
@@ -228,8 +357,8 @@ export default function MelhorEnvioView() {
 
       // Default mocked calculation if disconnected
       const results = await calculateMEQuote({
-        fromPostalCode: originCEP,
-        toPostalCode: destCEP,
+        fromPostalCode: cleanOrigin,
+        toPostalCode: cleanDest,
         weight,
         width,
         height,
@@ -237,7 +366,7 @@ export default function MelhorEnvioView() {
       });
       setQuoteResults(results);
     } catch (err: any) {
-      setErrorMsg("Erro ao realizar cotação de frete. Verifique as dimensões e CEPs.");
+      setErrorMsg(err.message || "Erro ao realizar cotação de frete. Verifique as dimensões e CEPs.");
     } finally {
       setQuoting(false);
     }
@@ -438,15 +567,21 @@ export default function MelhorEnvioView() {
                   <div>• users-read (Informações Básicas)</div>
                 </div>
 
-                <a
-                  href={realAuthUrl || "#"}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={`w-full flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs py-3 px-4 rounded-xl transition-all shadow-lg shadow-emerald-500/15 cursor-pointer ${!realAuthUrl ? "opacity-50 pointer-events-none" : ""}`}
+                <button
+                  onClick={handleConnectRealOAuthRedirect}
+                  className="w-full flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs py-3 px-4 rounded-xl transition-all shadow-lg shadow-emerald-500/15 cursor-pointer"
                 >
                   <Sparkles className="h-4 w-4 animate-pulse text-slate-900" />
-                  CONECTAR VIA OAUTH DE PRODUÇÃO
-                </a>
+                  CONECTAR VIA REDIRECIONAMENTO
+                </button>
+
+                <button
+                  onClick={handleConnectRealOAuthPopup}
+                  className="w-full flex items-center justify-center gap-2 border border-white/10 hover:bg-white/5 text-white font-bold text-[10px] py-2.5 px-3 rounded-xl transition-all cursor-pointer"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Conectar via Janela Popup
+                </button>
 
                 <button
                   onClick={handleConnectSimulated}
@@ -536,6 +671,79 @@ export default function MelhorEnvioView() {
               </div>
             </div>
           )}
+
+          {/* INTEGRATION AUDIT LOG ENGINE */}
+          <div className="glass-card p-5 rounded-2xl border border-white/5 space-y-3 relative overflow-hidden">
+            <div className="flex items-center justify-between border-b border-white/5 pb-2">
+              <h3 className="text-[10px] font-black tracking-widest text-white/50 uppercase flex items-center gap-2">
+                <Code className="h-3.5 w-3.5 text-blue-400 animate-pulse" />
+                LOGS DE INTEGRAÇÃO
+              </h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={fetchLogs}
+                  title="Atualizar Logs"
+                  className="text-white/40 hover:text-white transition-colors cursor-pointer"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                </button>
+                <button
+                  onClick={handleClearLogs}
+                  title="Limpar Logs"
+                  className="text-red-400/60 hover:text-red-400 transition-colors text-[9px] uppercase font-bold cursor-pointer"
+                >
+                  Limpar
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1 text-[10px] font-mono scrollbar-thin">
+              {integrationLogs.length === 0 ? (
+                <div className="text-white/30 text-center py-6 italic">
+                  Nenhum evento registrado ainda. O fluxo gerará logs em tempo real.
+                </div>
+              ) : (
+                integrationLogs.map((log: any) => {
+                  const isError = log.status === "ERROR";
+                  const isSuccess = log.status === "SUCCESS";
+                  const colorClass = isError 
+                    ? "text-red-400 border-red-500/10 bg-red-500/5" 
+                    : isSuccess 
+                    ? "text-emerald-400 border-emerald-500/10 bg-emerald-500/5" 
+                    : "text-blue-300 border-blue-500/10 bg-blue-500/5";
+
+                  return (
+                    <div key={log.id} className={`p-2 rounded border ${colorClass} transition-all`}>
+                      <div className="flex items-center justify-between font-bold mb-1">
+                        <span className="uppercase tracking-wider">[{log.step}]</span>
+                        <span className="text-[8px] text-white/40">
+                          {new Date(log.created_at).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <div className="text-white/80 leading-relaxed break-words">{log.message}</div>
+                      {log.response_body && (
+                        <details className="mt-1 border-t border-white/5 pt-1 text-[8px] text-white/40 cursor-pointer">
+                          <summary className="hover:text-white font-bold">Ver payload técnico</summary>
+                          <pre className="mt-1 bg-black/40 p-1.5 rounded text-[8px] text-[#A6C5E3] overflow-x-auto whitespace-pre-wrap leading-tight">
+                            {(() => {
+                              try {
+                                return JSON.stringify(JSON.parse(log.response_body), null, 2);
+                              } catch {
+                                return log.response_body;
+                              }
+                            })()}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            <div className="text-[8px] text-white/30 text-center border-t border-white/5 pt-2">
+              Auditoria Ativa • Sincronização Automática
+            </div>
+          </div>
         </div>
 
         {/* Right Side: Features Tabs Controller & Panels */}
