@@ -67,6 +67,29 @@ function calculateMedian(values: number[]): number {
   return (sorted[half - 1] + sorted[half]) / 2.0;
 }
 
+function parseBrazilianLocaleFloat(value: string | number): number {
+  if (value === undefined || value === null) return 0;
+  if (typeof value === "number") return isNaN(value) ? 0 : value;
+  
+  let cleanValue = String(value).trim();
+  if (!cleanValue) return 0;
+
+  if (cleanValue.includes(",") && cleanValue.includes(".")) {
+    const lastComma = cleanValue.lastIndexOf(",");
+    const lastDot = cleanValue.lastIndexOf(".");
+    if (lastComma > lastDot) {
+      cleanValue = cleanValue.replace(/\./g, "").replace(",", ".");
+    } else {
+      cleanValue = cleanValue.replace(/,/g, "");
+    }
+  } else if (cleanValue.includes(",")) {
+    cleanValue = cleanValue.replace(",", ".");
+  }
+  
+  const parsed = parseFloat(cleanValue);
+  return isNaN(parsed) ? 0 : parsed;
+}
+
 export default function MelhorEnvioView() {
   const [connected, setConnected] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
@@ -82,10 +105,11 @@ export default function MelhorEnvioView() {
   // Quote state
   const [originCEP, setOriginCEP] = useState("96020360");
   const [destCEP, setDestCEP] = useState("01018020");
-  const [weight, setWeight] = useState(1.5);
+  const [weight, setWeight] = useState<string>("1,5");
   const [width, setWidth] = useState(15);
   const [height, setHeight] = useState(10);
   const [length, setLength] = useState(20);
+  const [insuranceValue, setInsuranceValue] = useState<string>("0,00");
   const [quoteResults, setQuoteResults] = useState<QuoteResponse[]>([]);
   const [quoting, setQuoting] = useState(false);
 
@@ -339,15 +363,19 @@ export default function MelhorEnvioView() {
       return;
     }
 
+    const parsedWeight = parseBrazilianLocaleFloat(weight) || 1.5;
+    const parsedInsurance = parseBrazilianLocaleFloat(insuranceValue) || 0;
+
     try {
       if (connected) {
         const quoteRes = await calculateMelhorEnvioQuoteReal({
           fromPostalCode: cleanOrigin,
           toPostalCode: cleanDest,
-          weight,
+          weight: parsedWeight,
           width,
           height,
-          length
+          length,
+          insuranceValue: parsedInsurance
         });
         if (quoteRes && quoteRes.quotes) {
           setQuoteResults(quoteRes.quotes);
@@ -359,10 +387,11 @@ export default function MelhorEnvioView() {
       const results = await calculateMEQuote({
         fromPostalCode: cleanOrigin,
         toPostalCode: cleanDest,
-        weight,
+        weight: parsedWeight,
         width,
         height,
-        length
+        length,
+        insuranceValue: parsedInsurance
       });
       setQuoteResults(results);
     } catch (err: any) {
@@ -850,10 +879,21 @@ export default function MelhorEnvioView() {
                     <div>
                       <label className="text-[10px] text-white/40 font-bold block mb-1">Peso Estimado (kg)</label>
                       <input
-                        type="number"
-                        step="0.01"
+                        type="text"
                         value={weight}
-                        onChange={(e) => setWeight(Math.max(0.1, parseFloat(e.target.value) || 0))}
+                        onChange={(e) => setWeight(e.target.value)}
+                        placeholder="Ex: 1,5"
+                        className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-xs font-semibold text-white focus:ring-1 focus:ring-emerald-400 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] text-white/40 font-bold block mb-1">Valor Segurado / Declarado (R$)</label>
+                      <input
+                        type="text"
+                        value={insuranceValue}
+                        placeholder="Ex: 55,05"
+                        onChange={(e) => setInsuranceValue(e.target.value)}
                         className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-xs font-semibold text-white focus:ring-1 focus:ring-emerald-400 focus:outline-none"
                       />
                     </div>
@@ -902,56 +942,75 @@ export default function MelhorEnvioView() {
                     </button>
                   </form>
 
-                  {/* Quoting output list */}
-                  <div className="md:col-span-2 space-y-3">
-                    <span className="text-[10px] font-extrabold text-white/40 tracking-wider uppercase block border-b border-white/5 pb-1.5">Opções de Envio Disponíveis</span>
-                    
-                    {quoteResults.length === 0 ? (
-                      <div className="h-48 rounded-2xl bg-white/2 border border-white/5 flex flex-col items-center justify-center text-center p-4">
-                        <MapPin className="h-8 w-8 text-white/25 mb-2" />
-                        <p className="text-xs text-white/45 font-semibold">Preencha o formulário e clique em Calcular Tarifas para listar os fretes de entrega.</p>
-                      </div>
-                    ) : (
-                      <div className="space-y-2.5">
-                        {quoteResults.map((opt) => (
-                          <div 
-                            key={opt.name} 
-                            className="bg-white/3 border border-white/5 hover:border-emerald-400/25 p-4 rounded-xl flex items-center justify-between gap-4 transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              {opt.company?.picture ? (
-                                <img 
-                                  src={opt.company.picture} 
-                                  alt={opt.company.name} 
-                                  className="w-10 h-10 rounded-xl bg-white/5 border border-white/5 shrink-0"
-                                />
-                              ) : (
-                                <div className="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">
-                                  {opt.company?.name?.[0] || "T"}
+                    {/* Quoting output list */}
+                    <div className="md:col-span-2 space-y-3">
+                      <span className="text-[10px] font-extrabold text-white/40 tracking-wider uppercase block border-b border-white/5 pb-1.5">Opções de Envio Disponíveis</span>
+                      
+                      {(() => {
+                        const validQuotes = quoteResults.filter((opt) => opt && Number(opt.price || 0) > 0 && Number(opt.custom_price || 0) > 0);
+                        if (quoteResults.length === 0) {
+                          return (
+                            <div className="h-48 rounded-2xl bg-white/2 border border-white/5 flex flex-col items-center justify-center text-center p-4">
+                              <MapPin className="h-8 w-8 text-white/25 mb-2" />
+                              <p className="text-xs text-white/45 font-semibold">Preencha o formulário e clique em Calcular Tarifas para listar os fretes de entrega.</p>
+                            </div>
+                          );
+                        }
+                        if (validQuotes.length === 0) {
+                          return (
+                            <div className="h-48 rounded-2xl bg-white/2 border border-white/5 flex flex-col items-center justify-center text-center p-4">
+                              <MapPin className="h-8 w-8 text-white/25 mb-2" />
+                              <p className="text-xs text-white/45 font-semibold">Nenhuma transportadora disponível com valor válido para este cálculo.</p>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="space-y-2.5">
+                            {validQuotes.map((opt) => (
+                              <div 
+                                key={opt.name} 
+                                className="bg-white/3 border border-white/5 hover:border-emerald-400/25 p-4 rounded-xl flex items-center justify-between gap-4 transition-colors"
+                              >
+                                <div className="flex items-center gap-3">
+                                  {opt.company?.picture ? (
+                                    <img 
+                                      src={opt.company.picture} 
+                                      alt={opt.company.name} 
+                                      className="w-10 h-10 rounded-xl bg-white/5 border border-white/5 shrink-0"
+                                    />
+                                  ) : (
+                                    <div className="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">
+                                      {opt.company?.name?.[0] || "T"}
+                                    </div>
+                                  )}
+                                  
+                                  <div>
+                                    <span className="text-xs font-black text-white block leading-tight">
+                                      {opt.company?.name || "Transportadora"}
+                                    </span>
+                                    <span className="text-[10px] text-emerald-400 font-bold block mt-0.5">
+                                      {opt.name}
+                                    </span>
+                                    <span className="text-[9px] text-white/40 font-mono font-bold uppercase tracking-wide mt-1 block">
+                                      Previsão de entrega: {opt.delivery_time} {opt.delivery_time === 1 ? "dia útil" : "dias úteis"}
+                                    </span>
+                                  </div>
                                 </div>
-                              )}
-                              
-                              <div>
-                                <span className="text-xs font-black text-white block leading-tight">{opt.name}</span>
-                                <span className="text-[9px] text-white/40 font-mono font-bold uppercase tracking-wide mt-1 block">
-                                  Previsão de entrega: {opt.delivery_time} {opt.delivery_time === 1 ? "dia útil" : "dias úteis"}
-                                </span>
-                              </div>
-                            </div>
 
-                            <div className="text-right">
-                              <div className="text-sm font-black text-[#00FF66] font-mono leading-none">
-                                {formatCurrency(opt.custom_price)}
+                                <div className="text-right">
+                                  <div className="text-sm font-black text-[#00FF66] font-mono leading-none">
+                                    {formatCurrency(opt.custom_price)}
+                                  </div>
+                                  <div className="text-[9px] text-white/40 font-bold uppercase tracking-wider mt-1 block">
+                                    Sem desconto: <span className="line-through">{formatCurrency(opt.price)}</span>
+                                  </div>
+                                </div>
                               </div>
-                              <div className="text-[9px] text-white/40 font-bold uppercase tracking-wider mt-1 block">
-                                Sem desconto: <span className="line-through">{formatCurrency(opt.price)}</span>
-                              </div>
-                            </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                        );
+                      })()}
+                    </div>
 
                 </div>
               )}

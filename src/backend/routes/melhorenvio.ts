@@ -228,12 +228,16 @@ melhorenvioRouter.post("/quote", requireAuth, async (req, res) => {
       return res.json({ connected: false });
     }
 
-    const { fromPostalCode, toPostalCode, weight, width, height, length } = req.body;
+    const { fromPostalCode, toPostalCode, weight, width, height, length, insuranceValue, insurance_value, products } = req.body;
     const baseUrl = ME_BASE_URL;
 
+    // Retrieve origin/destination CEPs from either top-level or structured from/to parameters
+    const fromPostal = fromPostalCode || (req.body.from && req.body.from.postal_code);
+    const toPostal = toPostalCode || (req.body.to && req.body.to.postal_code);
+
     // Normalize CEP inputs explicitly (removing '.' and '-')
-    const cleanFrom = String(fromPostalCode || "").replace(/\D/g, "");
-    const cleanTo = String(toPostalCode || "").replace(/\D/g, "");
+    const cleanFrom = String(fromPostal || "").replace(/\D/g, "");
+    const cleanTo = String(toPostal || "").replace(/\D/g, "");
 
     if (cleanFrom.length !== 8 || cleanTo.length !== 8) {
       const errMsg = `CEP inválido informado para cálculo de frete. O CEP de origem (${cleanFrom}) ou o CEP de destino (${cleanTo}) deve possuir exatamente 8 números.`;
@@ -243,10 +247,33 @@ melhorenvioRouter.post("/quote", requireAuth, async (req, res) => {
         "QUOTE_ERROR",
         "ERROR",
         errMsg,
-        JSON.stringify({ original_from: fromPostalCode, original_to: toPostalCode })
+        JSON.stringify({ original_from: fromPostal, original_to: toPostal })
       );
       return res.status(400).json({ error: errMsg });
     }
+
+    // Build the products array matching the required precision parameters of the target provider
+    const finalProducts = Array.isArray(products) && products.length > 0
+      ? products.map((p: any) => ({
+          id: p.id || "default_item",
+          width: Number(p.width) || 10,
+          height: Number(p.height) || 10,
+          length: Number(p.length) || 10,
+          weight: Number(p.weight) || 1,
+          insurance_value: Number(p.insurance_value !== undefined ? p.insurance_value : p.insuranceValue) || 0,
+          quantity: Number(p.quantity) || 1
+        }))
+      : [
+          {
+            id: "default_item",
+            width: Number(width) || 10,
+            height: Number(height) || 10,
+            length: Number(length) || 10,
+            weight: Number(weight) || 1,
+            insurance_value: Number(insurance_value !== undefined ? insurance_value : insuranceValue) || 0,
+            quantity: 1
+          }
+        ];
 
     const payload = {
       from: {
@@ -255,17 +282,7 @@ melhorenvioRouter.post("/quote", requireAuth, async (req, res) => {
       to: {
         postal_code: cleanTo
       },
-      products: [
-        {
-          id: "default_item",
-          width: Number(width) || 10,
-          height: Number(height) || 10,
-          length: Number(length) || 10,
-          weight: Number(weight) || 1,
-          insurance_value: 0,
-          quantity: 1
-        }
-      ]
+      products: finalProducts
     };
 
     await dbOps.addMelhorEnvioLog(
@@ -276,15 +293,13 @@ melhorenvioRouter.post("/quote", requireAuth, async (req, res) => {
       JSON.stringify({ payload })
     );
 
+    const contactEmail = ME_USER_EMAIL || "eliasrobert45@gmail.com";
     const headers: Record<string, string> = {
+      "Accept": "application/json",
       "Authorization": `Bearer ${meConfig.access_token}`,
       "Content-Type": "application/json",
-      "Accept": "application/json"
+      "User-Agent": ME_USER_AGENT || `Integra BRT(${contactEmail})`
     };
-    if (ME_USER_AGENT) headers["User-Agent"] = ME_USER_AGENT;
-    else headers["User-Agent"] = "Integração BRT";
-    if (ME_USER_EMAIL) headers["email"] = ME_USER_EMAIL;
-    else headers["email"] = "eliasrobert45@gmail.com";
 
     const response = await fetch(`${baseUrl}/api/v2/me/shipment/calculate`, {
       method: "POST",
