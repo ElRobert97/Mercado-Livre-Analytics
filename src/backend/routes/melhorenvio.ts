@@ -156,114 +156,60 @@ melhorenvioRouter.get("/labels", requireAuth, async (req, res) => {
     }
 
     const baseUrl = ME_BASE_URL;
-    console.log(`[MELHOR ENVIO] Fetching real labels from ${baseUrl} for user ${userId}`);
+    console.log(`[MELHOR ENVIO] Fetching real labels from ${baseUrl}/api/v2/me/orders for user ${userId}`);
 
+    const contactEmail = ME_USER_EMAIL || "eliasrobert45@gmail.com";
     const headers: Record<string, string> = {
-      "Authorization": `Bearer ${meConfig.access_token}`,
       "Accept": "application/json",
+      "Authorization": `Bearer ${meConfig.access_token}`,
+      "User-Agent": `Integra BRT(${contactEmail})`
     };
-    if (ME_USER_AGENT) headers["User-Agent"] = ME_USER_AGENT;
-    else headers["User-Agent"] = "Integração BRT";
-    if (ME_USER_EMAIL) headers["email"] = ME_USER_EMAIL;
-    else headers["email"] = "eliasrobert45@gmail.com";
-
-    let reportData: any = null;
-    let reportOk = false;
 
     try {
-      const response = await fetch(`${baseUrl}/api/v2/me/shipment/report`, {
-        method: "GET",
-        headers: {
-          ...headers,
-          "Content-Type": "application/json"
-        }
-      });
-
-      const responseText = await response.text();
-      console.log(`[MELHOR ENVIO] Report response (status ${response.status}):`, responseText.substring(0, 200));
-
-      if (response.ok) {
-        try {
-          reportData = JSON.parse(responseText);
-          reportOk = true;
-        } catch (jsonErr: any) {
-          console.warn("[MELHOR ENVIO] Report response 200 OK but was not a valid JSON. Content starts with:", responseText.substring(0, 150));
-          await dbOps.addMelhorEnvioLog(
-            userId,
-            "LABELS_REPORT_PARSE_ERR",
-            "ERROR",
-            "A API /shipment/report retornou 200 OK mas o corpo não é JSON válido (muitas vezes HTML). Tentando fallback automático.",
-            responseText.substring(0, 500)
-          );
-        }
-      } else {
-        console.warn(`[MELHOR ENVIO] Report API status ${response.status}: ${responseText.substring(0, 150)}`);
-        await dbOps.addMelhorEnvioLog(
-          userId,
-          "LABELS_REPORT_ERR_CODELOG",
-          "ERROR",
-          `A API /shipment/report retornou erro HTTP ${response.status}. Tentando fallback automático.`,
-          responseText.substring(0, 500)
-        );
-      }
-    } catch (fetchErr: any) {
-      console.error("[MELHOR ENVIO] Error calling ME Report API:", fetchErr.message);
-    }
-
-    if (reportOk && reportData) {
-      let labels = Array.isArray(reportData) ? reportData : (reportData && Array.isArray(reportData.data) ? reportData.data : []);
-      return res.json({ labels, connected: true, real: true });
-    }
-
-    // Fallback: Fetch shipments info directly
-    try {
-      let fallbackUrl = `${baseUrl}/api/v2/me/shipments`;
-      console.log(`[MELHOR ENVIO] Executing fallback to GET ${fallbackUrl}`);
-
-      const responseGet = await fetch(fallbackUrl, {
+      const response = await fetch(`${baseUrl}/api/v2/me/orders`, {
         method: "GET",
         headers
       });
 
-      const textGet = await responseGet.text();
-      console.log(`[MELHOR ENVIO] Shipments fallback (status ${responseGet.status}):`, textGet.substring(0, 200));
+      const responseText = await response.text();
+      console.log(`[MELHOR ENVIO] Orders response (status ${response.status}):`, responseText.substring(0, 300));
 
-      if (responseGet.ok) {
+      if (response.ok) {
         try {
-          const dataGet = JSON.parse(textGet);
-          let labels = Array.isArray(dataGet) ? dataGet : (dataGet && Array.isArray(dataGet.data) ? dataGet.data : []);
+          const data = JSON.parse(responseText);
+          const labels = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : []);
           return res.json({ labels, connected: true, real: true });
-        } catch (e) {
-          console.error("[MELHOR ENVIO] GET /shipments response was OK but not a valid JSON. Body starts with:", textGet.substring(0, 150));
+        } catch (jsonErr: any) {
+          console.warn("[MELHOR ENVIO] Orders response 200 OK but was not a valid JSON. Body starts with:", responseText.substring(0, 150));
           await dbOps.addMelhorEnvioLog(
             userId,
-            "LABELS_GET_PARSE_ERR",
+            "LABELS_ORDERS_PARSE_ERR",
             "ERROR",
-            "A API de listagem de envios (shipments) retornou resposta não-JSON (HTML).",
-            textGet.substring(0, 1000)
+            "A API /me/orders retornou 200 OK mas o corpo não é JSON válido (muito provavelmente HTML).",
+            responseText.substring(0, 1000)
           );
-          return res.status(500).json({ 
-            error: "Melhor Envio retornou formato de dados inválido (HTML).", 
-            html_preview: textGet.substring(0, 1000) 
+          return res.status(500).json({
+            error: "Melhor Envio retornou formato de dados inválido (HTML).",
+            html_preview: responseText.substring(0, 1000)
           });
         }
       } else {
-        console.warn(`[MELHOR ENVIO] GET /shipments failure: ${textGet.substring(0, 150)}`);
+        console.warn(`[MELHOR ENVIO] Orders API status ${response.status}: ${responseText.substring(0, 150)}`);
         await dbOps.addMelhorEnvioLog(
           userId,
-          "LABELS_GET_REST_ERR",
+          "LABELS_ORDERS_HTTP_ERR",
           "ERROR",
-          `Falha ao recuperar listagem de envios (status ${responseGet.status}).`,
-          textGet.substring(0, 1000)
+          `A API /me/orders retornou erro HTTP ${response.status}.`,
+          responseText.substring(0, 1000)
         );
-        return res.status(responseGet.status).json({
-          error: `API do Melhor Envio retornou erro ${responseGet.status}`,
-          html_preview: textGet.substring(0, 1000)
+        return res.status(response.status).json({
+          error: `API do Melhor Envio retornou erro ${response.status}`,
+          html_preview: responseText.substring(0, 1000)
         });
       }
-    } catch (getErr: any) {
-      console.error("[MELHOR ENVIO] GET /shipments fetch error:", getErr.message);
-      return res.status(500).json({ error: `Erro na requisição ao Melhor Envio do Servidor: ${getErr.message}` });
+    } catch (fetchErr: any) {
+      console.error("[MELHOR ENVIO] Error calling ME Orders API:", fetchErr.message);
+      return res.status(500).json({ error: `Erro na requisição ao Melhor Envio do Servidor: ${fetchErr.message}` });
     }
   } catch (err: any) {
     console.error("Error retrieving ME labels:", err);
