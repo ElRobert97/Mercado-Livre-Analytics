@@ -1,6 +1,11 @@
 import { pool } from "../config/database";
 
 export async function initPostgres(): Promise<void> {
+  const connString = process.env.DATABASE_URL;
+  if (!connString) {
+    console.warn("⚠️ Skipping database schema initialization in bootstrap as DATABASE_URL is not configured.");
+    return;
+  }
   const client = await pool.connect();
   try {
     console.log("Initializing PostgreSQL database...");
@@ -220,12 +225,15 @@ export async function initPostgres(): Promise<void> {
       console.log("PostgreSQL database is empty. Performing initial user profile seed...");
       
       const now = new Date().toISOString();
+      const seedEmail = process.env.ADMIN_EMAIL || "robert@example.com";
+      const seedName = process.env.ADMIN_NAME || "Robert Elias";
+      const seedPass = process.env.ADMIN_PASSWORD_HASH || "123456";
 
       // Seed User Robert - keeping profile active for sessions
       await client.query(`
         INSERT INTO users (id, name, email, password_hash, created_at, updated_at)
-        VALUES ('user_robert', 'Robert Elias', 'eliasrobert45@gmail.com', '123456', $1, $1)
-      `, [now]);
+        VALUES ('user_robert', $1, $2, $3, $4, $4)
+      `, [seedName, seedEmail, seedPass, now]);
 
       // Seed Product Costs so they can still map real SKU matches
       await client.query(`

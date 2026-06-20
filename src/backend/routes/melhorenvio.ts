@@ -158,7 +158,7 @@ melhorenvioRouter.get("/labels", requireAuth, async (req, res) => {
     const baseUrl = ME_BASE_URL;
     console.log(`[MELHOR ENVIO] Fetching real labels from ${baseUrl}/api/v2/me/orders for user ${userId}`);
 
-    const contactEmail = ME_USER_EMAIL || "eliasrobert45@gmail.com";
+    const contactEmail = ME_USER_EMAIL || "suporte@suaempresa.com.br";
     const headers: Record<string, string> = {
       "Accept": "application/json",
       "Authorization": `Bearer ${meConfig.access_token}`,
@@ -293,7 +293,7 @@ melhorenvioRouter.post("/quote", requireAuth, async (req, res) => {
       JSON.stringify({ payload })
     );
 
-    const contactEmail = ME_USER_EMAIL || "eliasrobert45@gmail.com";
+    const contactEmail = ME_USER_EMAIL || "suporte@suaempresa.com.br";
     const headers: Record<string, string> = {
       "Accept": "application/json",
       "Authorization": `Bearer ${meConfig.access_token}`,

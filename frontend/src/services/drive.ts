@@ -68,8 +68,8 @@ export function getConnectedUser() {
   if (googleUser) return googleUser;
   if (localStorage.getItem("google_drive_simulated_connected") === "true") {
     return {
-      name: "Elias Robert (Simulado)",
-      email: "eliasrobert45@gmail.com",
+      name: "Robert Elias (Simulado)",
+      email: "robert@example.com",
       picture: "https://api.dicebear.com/7.x/bottts/svg?seed=elias"
     };
   }
@@ -95,8 +95,8 @@ export function connectGoogleDriveReal(clientId: string) {
 export function connectGoogleDriveSimulated() {
   localStorage.setItem("google_drive_simulated_connected", "true");
   googleUser = {
-    name: "Elias Robert (Simulado)",
-    email: "eliasrobert45@gmail.com",
+    name: "Robert Elias (Simulado)",
+    email: "robert@example.com",
     picture: "https://api.dicebear.com/7.x/bottts/svg?seed=elias"
   };
   return googleUser;

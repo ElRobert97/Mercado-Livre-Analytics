@@ -1,28 +1,27 @@
-import { Pool, PoolConfig } from "pg";
+import { pool, isPostgresConnected, setPostgresConnected, initializeInMemoryDatabase } from "./config/database";
 import { User, MercadoLivreAccount, Order, OrderItem, ProductCost, CostImportBatch, OrderFinancialSummary, StateTaxProfile, OrderTaxSummary } from "./shared/types";
 
-// Connection String provided by the user
-const NEON_DB_URL = "postgresql://neondb_owner:npg_kT5LIf7btgCz@ep-weathered-pond-aiuvi42a.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
-
-// Use environment variable DATABASE_URL if available, otherwise fallback to the user's connection string
-const connectionString = process.env.DATABASE_URL || NEON_DB_URL;
-
-const poolConfig: PoolConfig = {
-  connectionString,
-  ssl: {
-    rejectUnauthorized: false // Required for Neon serverless postgres connections
-  },
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
-};
-
-export const pool = new Pool(poolConfig);
+export { pool };
 
 // Initialize DB schema and seed initial data if needed
 export async function initPostgres(): Promise<void> {
-  const client = await pool.connect();
+  const connString = process.env.DATABASE_URL;
+  if (!connString) {
+    console.warn("⚠️ Skipping database schema initialization as DATABASE_URL is not configured. Falling back to clean in-memory database.");
+    setPostgresConnected(false);
+    initializeInMemoryDatabase();
+    return;
+  }
+  
+  setPostgresConnected(true);
+  let client;
   try {
+    client = await pool.connect();
+    if (!isPostgresConnected) {
+      console.warn("⚠️ Database connection failed. Initializing mock schemas in-memory.");
+      initializeInMemoryDatabase();
+      return;
+    }
     console.log("Initializing PostgreSQL database...");
     
     // Create tables
@@ -261,12 +260,15 @@ export async function initPostgres(): Promise<void> {
       console.log("PostgreSQL database is empty. Performing initial user profile seed...");
       
       const now = new Date().toISOString();
+      const seedEmail = process.env.ADMIN_EMAIL || "robert@example.com";
+      const seedName = process.env.ADMIN_NAME || "Robert Elias";
+      const seedPass = process.env.ADMIN_PASSWORD_HASH || "123456";
 
       // Seed User Robert - keeping profile active for sessions
       await client.query(`
         INSERT INTO users (id, name, email, password_hash, created_at, updated_at)
-        VALUES ('user_robert', 'Robert Elias', 'eliasrobert45@gmail.com', '123456', $1, $1)
-      `, [now]);
+        VALUES ('user_robert', $1, $2, $3, $4, $4)
+      `, [seedName, seedEmail, seedPass, now]);
 
       // Seed Product Costs so they can still map real SKU matches
       await client.query(`
